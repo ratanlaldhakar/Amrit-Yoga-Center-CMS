@@ -11,6 +11,7 @@ import {
   MessageSquare,
   Loader2,
   ShieldCheck,
+  Edit3,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { formatPeriodGraceful } from '../../lib/formatters';
@@ -28,6 +29,7 @@ interface ReceiptModalProps {
   settings: CenterSettings;
   studentPhone?: string;
   transactionRef?: string;
+  onEdit?: (receipt: Receipt) => void;
 }
 
 export const ReceiptModal: React.FC<ReceiptModalProps> = ({
@@ -37,6 +39,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
   settings,
   studentPhone,
   transactionRef,
+  onEdit,
 }) => {
   const { showToast } = useToast();
   const [isDownloading, setIsDownloading] = useState(false);
@@ -180,7 +183,23 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
               <span>{isPrinting ? 'Printing...' : 'Print'}</span>
             </button>
 
-            {/* 5. Done / Close (Clean Ghost / Borderless) */}
+            {/* 5. Edit (Amber Subtle Pill) */}
+            {onEdit && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onEdit(receipt);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 sm:px-3.5 sm:py-1.5 text-xs font-semibold text-amber-800 bg-amber-50 hover:bg-amber-100 rounded-lg border border-amber-200 transition-colors shadow-2xs"
+                title="Edit receipt and payment details"
+              >
+                <Edit3 className="w-3.5 h-3.5 text-amber-700" />
+                <span>Edit</span>
+              </button>
+            )}
+
+            {/* 6. Done / Close (Clean Ghost / Borderless) */}
             <button
               type="button"
               onClick={onClose}

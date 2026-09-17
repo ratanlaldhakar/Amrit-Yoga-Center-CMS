@@ -463,7 +463,7 @@ export const UsersView: React.FC = () => {
                 onChange={e => setSalary(e.target.value)}
                 placeholder="e.g. 28000"
                 min="0"
-                step="500"
+                step="any"
                 className="w-full text-sm rounded-md border border-slate-300 px-3 py-2 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-brand-700"
               />
             </div>

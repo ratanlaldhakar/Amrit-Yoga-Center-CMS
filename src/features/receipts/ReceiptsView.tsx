@@ -1,8 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Receipt } from '../../types';
 import { storageService } from '../../services/storageService';
 import { formatINR, formatDate } from '../../lib/formatters';
-import { Search, Share2, Eye, Download, MessageSquare, Loader2 } from 'lucide-react';
+import { Search, Share2, Eye, Download, MessageSquare, Loader2, Edit3 } from 'lucide-react';
 import { exportToCSV } from '../../lib/exportUtils';
 import { useToast } from '../../context/ToastContext';
 import {
@@ -14,15 +14,26 @@ import {
 interface ReceiptsViewProps {
   onViewReceipt: (receipt: Receipt) => void;
   onOpenWhatsApp: (phone: string, name: string, template: any, params: any) => void;
+  onEditReceipt?: (receipt: Receipt) => void;
 }
 
-export const ReceiptsView: React.FC<ReceiptsViewProps> = ({ onViewReceipt }) => {
+export const ReceiptsView: React.FC<ReceiptsViewProps> = ({ onViewReceipt, onEditReceipt }) => {
   const { showToast } = useToast();
-  const receipts = storageService.getReceipts();
-  const students = storageService.getStudents();
-  const settings = storageService.getSettings();
+  const [receipts, setReceipts] = useState<Receipt[]>(storageService.getReceipts());
+  const [students, setStudents] = useState(storageService.getStudents());
+  const [settings, setSettings] = useState(storageService.getSettings());
   const [searchQuery, setSearchQuery] = useState('');
   const [loadingRowId, setLoadingRowId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleUpdate = () => {
+      setReceipts(storageService.getReceipts());
+      setStudents(storageService.getStudents());
+      setSettings(storageService.getSettings());
+    };
+    window.addEventListener('amrit_data_updated', handleUpdate);
+    return () => window.removeEventListener('amrit_data_updated', handleUpdate);
+  }, []);
 
   const filteredReceipts = useMemo(() => {
     return receipts.filter(r => {
@@ -240,6 +251,18 @@ export const ReceiptsView: React.FC<ReceiptsViewProps> = ({ onViewReceipt }) => 
                           >
                             <MessageSquare className="w-3.5 h-3.5" />
                           </button>
+
+                          {/* Edit Modal */}
+                          {onEditReceipt && (
+                            <button
+                              type="button"
+                              onClick={() => onEditReceipt(r)}
+                              className="p-1.5 rounded text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 transition-colors shadow-2xs"
+                              title="Edit receipt details"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
 
                           {/* View Modal */}
                           <button

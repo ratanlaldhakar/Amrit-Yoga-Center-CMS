@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Modal } from '../../components/common/Modal';
 import { Student, Payment, Receipt, BillingCycle } from '../../types';
 import { storageService } from '../../services/storageService';
@@ -41,9 +41,16 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
   onViewReceipt,
 }) => {
   const { showToast } = useToast();
+  const [, setTick] = useState(0);
   const [isAdjustingDate, setIsAdjustingDate] = useState(false);
   const [newDueDate, setNewDueDate] = useState('');
   const [adjustReason, setAdjustReason] = useState('');
+
+  useEffect(() => {
+    const handleUpdate = () => setTick(t => t + 1);
+    window.addEventListener('amrit_data_updated', handleUpdate);
+    return () => window.removeEventListener('amrit_data_updated', handleUpdate);
+  }, []);
 
   if (!student) return null;
 
@@ -93,7 +100,10 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
         <div className="flex items-center justify-between w-full">
           <button
             type="button"
-            onClick={() => onEdit(currentStudent)}
+            onClick={() => {
+              onClose();
+              onEdit(currentStudent);
+            }}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded transition-colors"
           >
             <Edit2 className="w-3.5 h-3.5" />
@@ -112,7 +122,10 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
 
             <button
               type="button"
-              onClick={() => onCollectFee(currentStudent)}
+              onClick={() => {
+                onClose();
+                onCollectFee(currentStudent);
+              }}
               className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold text-white bg-brand-700 hover:bg-brand-800 rounded transition-colors shadow-2xs"
             >
               <CreditCard className="w-3.5 h-3.5" />

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Payment, Receipt } from '../../types';
 import { storageService } from '../../services/storageService';
 import { formatINR, formatDate } from '../../lib/formatters';
@@ -12,14 +12,19 @@ import {
   Ban,
   CheckCircle2,
   Calendar,
+  Edit3,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 
 interface PaymentsLedgerViewProps {
   onViewReceipt: (receipt: Receipt) => void;
+  onEditReceipt?: (receipt: Receipt, payment?: Payment) => void;
 }
 
-export const PaymentsLedgerView: React.FC<PaymentsLedgerViewProps> = ({ onViewReceipt }) => {
+export const PaymentsLedgerView: React.FC<PaymentsLedgerViewProps> = ({
+  onViewReceipt,
+  onEditReceipt,
+}) => {
   const { showToast } = useToast();
   const [payments, setPayments] = useState<Payment[]>(storageService.getPayments());
   const receipts = storageService.getReceipts();
@@ -36,6 +41,12 @@ export const PaymentsLedgerView: React.FC<PaymentsLedgerViewProps> = ({ onViewRe
   const refreshPayments = () => {
     setPayments(storageService.getPayments());
   };
+
+  useEffect(() => {
+    const handleUpdate = () => refreshPayments();
+    window.addEventListener('amrit_data_updated', handleUpdate);
+    return () => window.removeEventListener('amrit_data_updated', handleUpdate);
+  }, []);
 
   const filteredPayments = useMemo(() => {
     return payments.filter(p => {
@@ -262,10 +273,44 @@ export const PaymentsLedgerView: React.FC<PaymentsLedgerViewProps> = ({ onViewRe
                             <button
                               type="button"
                               onClick={() => onViewReceipt(receipt)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded"
+                              className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded shadow-2xs"
+                              title="View official receipt"
                             >
                               <ReceiptIcon className="w-3 h-3 text-slate-500" />
                               Bill
+                            </button>
+                          )}
+                          {!isVoid && onEditReceipt && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const targetReceipt = receipt || storageService.getReceiptByNo(p.receiptNo) || {
+                                  id: `rec-${p.id}`,
+                                  receiptNo: p.receiptNo,
+                                  paymentId: p.id,
+                                  studentId: p.studentId,
+                                  studentName: p.studentName,
+                                  studentCode: p.studentCode || '',
+                                  batchName: 'General',
+                                  planName: p.planName,
+                                  billingPeriod: p.billingPeriod || p.feeMonth,
+                                  billingStartDate: p.billingStartDate,
+                                  billingEndDate: p.billingEndDate,
+                                  baseAmount: p.baseAmount || p.amount,
+                                  discountAmount: p.discountAmount || 0,
+                                  amount: p.amount,
+                                  outstandingAmount: 0,
+                                  paymentMethod: p.paymentMethod,
+                                  issuedDate: p.paymentDate,
+                                  notes: p.notes,
+                                  status: 'Active',
+                                };
+                                onEditReceipt(targetReceipt, p);
+                              }}
+                              className="p-1 rounded text-amber-700 hover:bg-amber-50 hover:border-amber-200 border border-transparent"
+                              title="Edit Receipt / Payment Details"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
                             </button>
                           )}
                           {!isVoid && (

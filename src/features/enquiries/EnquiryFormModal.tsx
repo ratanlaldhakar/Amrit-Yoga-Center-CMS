@@ -148,10 +148,11 @@ export const EnquiryFormModal: React.FC<EnquiryFormModalProps> = ({
               Interested Batch
             </label>
             <select
-              value={preferredBatchId}
+              value={preferredBatchId || ''}
               onChange={e => setPreferredBatchId(e.target.value)}
               className="w-full text-sm rounded-md border border-slate-300 px-3 py-2 bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-brand-700 font-medium"
             >
+              <option value="">-- Flexible / Not Decided --</option>
               {['Morning', 'Afternoon', 'Evening', 'Other'].map(period => {
                 const periodBatches = batches.filter(b => b.sessionPeriod === period);
                 if (periodBatches.length === 0) return null;

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Student, StudentStatus } from '../../types';
 import { storageService } from '../../services/storageService';
 import { formatINR, formatDate } from '../../lib/formatters';
@@ -41,6 +41,15 @@ export const StudentsView: React.FC<StudentsViewProps> = ({
   const { showToast } = useToast();
   const [refreshKey, setRefreshKey] = useState(0);
   const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
+
+  // Reactive listener for immediate real-time sync across modals & edits
+  useEffect(() => {
+    const handleUpdate = () => {
+      setRefreshKey(k => k + 1);
+    };
+    window.addEventListener('amrit_data_updated', handleUpdate);
+    return () => window.removeEventListener('amrit_data_updated', handleUpdate);
+  }, []);
 
   const students = useMemo(() => storageService.getStudents(), [refreshKey]);
   const batches = useMemo(() => storageService.getBatches(), [refreshKey]);

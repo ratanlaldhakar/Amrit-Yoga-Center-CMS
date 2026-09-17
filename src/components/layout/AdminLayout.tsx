@@ -9,6 +9,7 @@ import { Student, Receipt, Enquiry, TrialClass } from '../../types';
 import { GlobalSearchModal } from '../common/GlobalSearchModal';
 import { CollectFeeModal } from '../payments/CollectFeeModal';
 import { ReceiptModal } from '../receipts/ReceiptModal';
+import { EditReceiptModal } from '../receipts/EditReceiptModal';
 import { WhatsAppModal } from '../whatsapp/WhatsAppModal';
 import { StudentFormModal } from '../../features/students/StudentFormModal';
 import { StudentProfileModal } from '../../features/students/StudentProfileModal';
@@ -104,6 +105,10 @@ export const AdminLayout: React.FC = () => {
   const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
   const [receiptStudentPhone, setReceiptStudentPhone] = useState<string>('');
 
+  // Edit Receipt Modal State
+  const [receiptToEdit, setReceiptToEdit] = useState<Receipt | null>(null);
+  const [isEditReceiptOpen, setIsEditReceiptOpen] = useState(false);
+
   // Student Form & Profile Modal State
   const [isStudentFormOpen, setIsStudentFormOpen] = useState(false);
   const [studentToEdit, setStudentToEdit] = useState<Student | null>(null);
@@ -156,6 +161,11 @@ export const AdminLayout: React.FC = () => {
     setIsReceiptModalOpen(true);
   };
 
+  const handleEditReceipt = (receipt: Receipt) => {
+    setReceiptToEdit(receipt);
+    setIsEditReceiptOpen(true);
+  };
+
   const handleViewStudent = (student: Student) => {
     setSelectedStudentProfile(student);
     setIsStudentProfileOpen(true);
@@ -169,6 +179,7 @@ export const AdminLayout: React.FC = () => {
   };
 
   const handleEditStudent = (student: Student) => {
+    setIsStudentProfileOpen(false);
     setStudentToEdit(student);
     setStudentInitialData(undefined);
     setIsStudentFormOpen(true);
@@ -292,13 +303,17 @@ export const AdminLayout: React.FC = () => {
             )}
 
             {currentTab === 'payments' && (
-              <PaymentsLedgerView onViewReceipt={handleViewReceipt} />
+              <PaymentsLedgerView
+                onViewReceipt={handleViewReceipt}
+                onEditReceipt={handleEditReceipt}
+              />
             )}
 
             {currentTab === 'receipts' && (
               <ReceiptsView
                 onViewReceipt={handleViewReceipt}
                 onOpenWhatsApp={handleOpenWhatsApp}
+                onEditReceipt={handleEditReceipt}
               />
             )}
 
@@ -386,6 +401,22 @@ export const AdminLayout: React.FC = () => {
         receipt={selectedReceipt}
         settings={settings}
         studentPhone={receiptStudentPhone}
+        onEdit={handleEditReceipt}
+      />
+
+      {/* 3b. Edit Receipt Modal */}
+      <EditReceiptModal
+        isOpen={isEditReceiptOpen}
+        onClose={() => {
+          setIsEditReceiptOpen(false);
+          setReceiptToEdit(null);
+        }}
+        receipt={receiptToEdit}
+        onSuccess={(updatedReceipt) => {
+          if (selectedReceipt && selectedReceipt.receiptNo === updatedReceipt.receiptNo) {
+            setSelectedReceipt(updatedReceipt);
+          }
+        }}
       />
 
       {/* 4. Student Form Modal (Add / Edit) */}
@@ -409,7 +440,10 @@ export const AdminLayout: React.FC = () => {
         onClose={() => setIsStudentProfileOpen(false)}
         student={selectedStudentProfile}
         onEdit={handleEditStudent}
-        onCollectFee={s => handleOpenCollectFee(s.id, s.monthlyFee)}
+        onCollectFee={s => {
+          setIsStudentProfileOpen(false);
+          handleOpenCollectFee(s.id, s.monthlyFee);
+        }}
         onOpenWhatsApp={(phone, name) => handleOpenWhatsApp(phone, name, 'fee_reminder', { studentName: name })}
         onViewReceipt={handleViewReceipt}
       />

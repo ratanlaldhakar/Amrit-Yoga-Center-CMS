@@ -73,7 +73,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Selected batch object
-  const currentBatch = batches.find(b => b.id === batchId) || batches[0];
+  const currentBatch = batches.find(b => b.id === batchId);
   const selectedPlan = feePlans.find(p => p.id === selectedPlanId);
 
   // Initialize or reset form
@@ -87,7 +87,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
       setGender(studentToEdit.gender);
       setAddress(studentToEdit.address || '');
       setJoiningDate(studentToEdit.joiningDate);
-      setBatchId(studentToEdit.batchId);
+      setBatchId(studentToEdit.batchId || '');
       setStatus(studentToEdit.status);
       setNotes(studentToEdit.notes || '');
 
@@ -161,21 +161,24 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
   const handleBatchChange = (newBatchId: string) => {
     setBatchId(newBatchId);
     const b = batches.find(item => item.id === newBatchId);
-    if (b && !studentToEdit) {
+    if (!studentToEdit) {
+      const defaultFee = b ? (b.monthlyFee || 2000) : (settings.defaultMonthlyFee || 2000);
       if (selectedPlanId === 'plan_monthly') {
-        setBaseFee(b.monthlyFee || 2000);
+        setBaseFee(defaultFee);
       } else if (selectedPlanId === 'plan_quarterly') {
-        const base = (b.monthlyFee || 2000) * 3;
+        const base = defaultFee * 3;
         setBaseFee(base);
         setDiscountType('FIXED');
         setDiscountValue(500);
         setDiscountReason('3-Month Plan Offer (Save ₹500)');
       } else if (selectedPlanId === 'plan_half_yearly') {
-        const base = (b.monthlyFee || 2000) * 6;
+        const base = defaultFee * 6;
         setBaseFee(base);
         setDiscountType('FIXED');
         setDiscountValue(2000);
         setDiscountReason('6-Month Plan Offer (Save ₹2,000)');
+      } else {
+        setBaseFee(defaultFee);
       }
     }
   };
@@ -185,8 +188,8 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
     const plan = feePlans.find(p => p.id === newPlanId);
     if (!plan) return;
 
-    const b = currentBatch || batches[0];
-    const bFee = b ? b.monthlyFee : 2000;
+    const b = currentBatch;
+    const bFee = b ? (b.monthlyFee || 2000) : (studentToEdit?.baseFee || settings?.defaultMonthlyFee || 2000);
 
     if (plan.id === 'plan_monthly') {
       setCustomMonths(1);
@@ -504,14 +507,14 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="sm:col-span-2">
               <label className="block text-[11px] font-semibold text-slate-700 uppercase tracking-wider mb-1">
-                Assigned Batch <span className="text-rose-500">*</span>
+                Assigned Batch <span className="text-slate-400 font-normal">(Optional)</span>
               </label>
               <select
-                value={batchId}
+                value={batchId || ''}
                 onChange={e => handleBatchChange(e.target.value)}
                 className="w-full text-xs rounded border border-slate-300 px-3 py-2 bg-white text-slate-900 font-semibold focus:outline-none focus:ring-1 focus:ring-brand-700"
-                required
               >
+                <option value="">-- Unassigned (No Batch Allocated) --</option>
                 {['Morning', 'Afternoon', 'Evening', 'Other'].map(period => {
                   const periodBatches = batches.filter(b => b.sessionPeriod === period);
                   if (periodBatches.length === 0) return null;
@@ -599,7 +602,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
                 <input
                   type="number"
                   min="0"
-                  step="50"
+                  step="any"
                   value={baseFee}
                   onChange={e => setBaseFee(Number(e.target.value))}
                   className="w-full text-xs rounded border border-slate-300 pl-7 pr-3 py-2 bg-white text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-brand-700"

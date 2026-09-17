@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { BillingCycle } from '../../types';
+import { BillingCycle, Student } from '../../types';
 import { storageService } from '../../services/storageService';
 import { formatINR, formatDate } from '../../lib/formatters';
 import { exportToCSV } from '../../lib/exportUtils';
@@ -35,6 +35,14 @@ export const FeesView: React.FC<FeesViewProps> = ({
   // Ensure up-to-date statuses based on current date
   const billingCycles = storageService.recalculateCycleStatuses();
   const metrics = storageService.getDashboardMetrics();
+  const students = storageService.getStudents();
+
+  // Student lookup map to ensure live name, batch, and contact details are always current
+  const studentsMap = useMemo(() => {
+    const map = new Map<string, Student>();
+    students.forEach(s => map.set(s.id, s));
+    return map;
+  }, [students, billingCycles]);
 
   const [activeTab, setActiveTab] = useState<
     'all_pending' | 'overdue' | 'due_today' | 'upcoming' | 'partial' | 'all'
@@ -50,11 +58,12 @@ export const FeesView: React.FC<FeesViewProps> = ({
     let allPending = 0;
 
     billingCycles.forEach(c => {
-      if (c.paymentStatus === 'OVERDUE') overdue++;
-      if (c.paymentStatus === 'DUE TODAY') dueToday++;
-      if (c.paymentStatus === 'UPCOMING') upcoming++;
-      if (c.paymentStatus === 'PARTIALLY PAID') partial++;
-      if (c.paymentStatus !== 'PAID') allPending++;
+      const status = c.paymentStatus || c.status;
+      if (status === 'OVERDUE') overdue++;
+      if (status === 'DUE TODAY') dueToday++;
+      if (status === 'UPCOMING') upcoming++;
+      if (status === 'PARTIALLY PAID') partial++;
+      if (status !== 'PAID') allPending++;
     });
 
     return { overdue, dueToday, upcoming, partial, allPending, total: billingCycles.length };
@@ -64,23 +73,31 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const filteredCycles = useMemo(() => {
     return billingCycles
       .filter(cycle => {
+        const student = studentsMap.get(cycle.studentId);
+        const name = (student?.fullName || cycle.studentName || '').toLowerCase();
+        const code = (student?.studentId || cycle.studentCode || '').toLowerCase();
+        const phone = student?.mobileNumber || cycle.mobileNumber || '';
+        const batch = (student?.batchName || cycle.batchName || '').toLowerCase();
+        const plan = (student?.feePlan || cycle.planName || '').toLowerCase();
+
         const q = searchQuery.toLowerCase().trim();
         const matchesSearch =
           !q ||
-          (cycle.studentName || '').toLowerCase().includes(q) ||
-          (cycle.studentCode || '').toLowerCase().includes(q) ||
-          (cycle.mobileNumber || '').includes(q) ||
-          (cycle.batchName || '').toLowerCase().includes(q) ||
-          (cycle.planName || '').toLowerCase().includes(q);
+          name.includes(q) ||
+          code.includes(q) ||
+          phone.includes(q) ||
+          batch.includes(q) ||
+          plan.includes(q);
 
         if (!matchesSearch) return false;
 
+        const status = cycle.paymentStatus || cycle.status;
         if (activeTab === 'all') return true;
-        if (activeTab === 'all_pending') return cycle.paymentStatus !== 'PAID';
-        if (activeTab === 'overdue') return cycle.paymentStatus === 'OVERDUE';
-        if (activeTab === 'due_today') return cycle.paymentStatus === 'DUE TODAY';
-        if (activeTab === 'upcoming') return cycle.paymentStatus === 'UPCOMING';
-        if (activeTab === 'partial') return cycle.paymentStatus === 'PARTIALLY PAID';
+        if (activeTab === 'all_pending') return status !== 'PAID';
+        if (activeTab === 'overdue') return status === 'OVERDUE';
+        if (activeTab === 'due_today') return status === 'DUE TODAY';
+        if (activeTab === 'upcoming') return status === 'UPCOMING';
+        if (activeTab === 'partial') return status === 'PARTIALLY PAID';
 
         return true;
       })
@@ -93,7 +110,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
         const dateB = b.nextDueDate || b.dueDate || '9999-12-31';
         return new Date(dateA).getTime() - new Date(dateB).getTime();
       });
-  }, [billingCycles, activeTab, searchQuery]);
+  }, [billingCycles, activeTab, searchQuery, studentsMap]);
 
   const totalOutstandingFiltered = filteredCycles.reduce(
     (acc, curr) => acc + (curr.paymentStatus === 'PAID' ? 0 : curr.outstandingAmount),
@@ -126,25 +143,34 @@ export const FeesView: React.FC<FeesViewProps> = ({
       'Receipt No',
     ];
 
-    const rows = filteredCycles.map(c => [
-      c.studentCode || '',
-      c.studentName || '',
-      c.mobileNumber || '',
-      c.batchName || '',
-      c.planName || 'Monthly Regular',
-      c.durationMonths || 1,
-      c.periodStartDate || '',
-      c.periodEndDate || '',
-      c.nextDueDate || c.dueDate || '',
-      c.baseAmount || 0,
-      c.discountAmount || 0,
-      c.payableAmount !== undefined ? c.payableAmount : c.finalAmount,
-      c.amountPaid || 0,
-      c.outstandingAmount || 0,
-      c.paymentStatus || c.status || 'PENDING',
-      c.daysOverdue || 0,
-      c.receiptNo || '',
-    ]);
+    const rows = filteredCycles.map(c => {
+      const student = studentsMap.get(c.studentId);
+      const studentName = student?.fullName || c.studentName || '';
+      const studentCode = student?.studentId || c.studentCode || '';
+      const mobileNumber = student?.mobileNumber || c.mobileNumber || '';
+      const batchName = student?.batchName || c.batchName || '';
+      const planName = student?.feePlan || c.planName || 'Monthly Regular';
+
+      return [
+        studentCode,
+        studentName,
+        mobileNumber,
+        batchName,
+        planName,
+        c.durationMonths || 1,
+        c.periodStartDate || '',
+        c.periodEndDate || '',
+        c.nextDueDate || c.dueDate || '',
+        c.baseAmount || 0,
+        c.discountAmount || 0,
+        c.payableAmount !== undefined ? c.payableAmount : c.finalAmount,
+        c.amountPaid || 0,
+        c.outstandingAmount || 0,
+        c.paymentStatus || c.status || 'PENDING',
+        c.daysOverdue || 0,
+        c.receiptNo || '',
+      ];
+    });
 
     exportToCSV(`Amrit_Yoga_Billing_Cycles_${activeTab}`, headers, rows);
     showToast(`Exported ${filteredCycles.length} billing cycles to CSV`);
@@ -156,10 +182,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-4">
         <div>
           <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-            Fee Collection & Membership Billing Cycles
+            Fees & Dues
           </h1>
           <p className="text-xs text-slate-500 mt-0.5">
-            Individual joining-date billing anchors, advance cycle tracking, discounts, and WhatsApp payment reminders.
+            Active membership billing cycles, real-time fee tracking, and collection ledger.
           </p>
         </div>
 
@@ -167,81 +193,94 @@ export const FeesView: React.FC<FeesViewProps> = ({
           <button
             type="button"
             onClick={handleExportCSV}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded shadow-2xs transition-colors"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-2xs transition-colors"
           >
             <Download className="w-3.5 h-3.5 text-slate-500" />
-            Export CSV
+            <span>Export CSV</span>
           </button>
         </div>
       </div>
 
-      {/* KPI Counters */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="p-3.5 rounded-lg bg-white border border-slate-200 shadow-2xs">
-          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
-            Total Fees Collected (Sep)
-          </span>
-          <span className="text-lg font-bold text-emerald-700">
+      {/* Summary KPI Cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="p-3.5 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
+          <div className="text-[11px] font-medium text-slate-500 uppercase tracking-wider">
+            Total Fees Collected ({new Date().toLocaleString('en-IN', { month: 'short' })})
+          </div>
+          <div className="text-lg font-bold text-emerald-600 mt-1">
             {formatINR(metrics.feesCollectedThisMonth)}
-          </span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">Advance receipts collected</span>
+          </div>
+          <div className="text-[10px] text-slate-400 mt-0.5">
+            Advance receipts collected
+          </div>
         </div>
 
-        <div className="p-3.5 rounded-lg bg-white border border-slate-200 shadow-2xs">
-          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+        <div className="p-3.5 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
+          <div className="text-[11px] font-medium text-slate-500 uppercase tracking-wider">
             Total Dues & Pending
-          </span>
-          <span className="text-lg font-bold text-amber-700">
+          </div>
+          <div className="text-lg font-bold text-amber-600 mt-1">
             {formatINR(metrics.pendingFeesAmount)}
-          </span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">
+          </div>
+          <div className="text-[10px] text-slate-400 mt-0.5">
             {tabCounts.allPending} pending / overdue accounts
-          </span>
+          </div>
         </div>
 
-        <div className="p-3.5 rounded-lg bg-rose-50/70 border border-rose-200 shadow-2xs">
-          <span className="text-[10px] font-bold text-rose-600 uppercase tracking-wider block">
+        <div className="p-3.5 rounded-xl bg-white border border-rose-100 shadow-2xs bg-rose-50/20">
+          <div className="text-[11px] font-medium text-rose-600 uppercase tracking-wider">
             Overdue Accounts
-          </span>
-          <span className="text-lg font-bold text-rose-700">
+          </div>
+          <div className="text-lg font-bold text-rose-700 mt-1">
             {tabCounts.overdue} Cycles
-          </span>
-          <span className="text-[10px] text-rose-600 block mt-0.5">Require immediate follow-up</span>
+          </div>
+          <div className="text-[10px] text-rose-500/80 mt-0.5">
+            Require immediate follow-up
+          </div>
         </div>
 
-        <div className="p-3.5 rounded-lg bg-white border border-slate-200 shadow-2xs">
-          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+        <div className="p-3.5 rounded-xl bg-white border border-slate-200/80 shadow-2xs">
+          <div className="text-[11px] font-medium text-slate-500 uppercase tracking-wider">
             Active Filter Balance
-          </span>
-          <span className="text-lg font-bold text-slate-900">
+          </div>
+          <div className="text-lg font-bold text-slate-900 mt-1">
             {formatINR(totalOutstandingFiltered)}
-          </span>
-          <span className="text-[10px] text-slate-400 block mt-0.5">
+          </div>
+          <div className="text-[10px] text-slate-400 mt-0.5">
             {filteredCycles.length} records shown
-          </span>
+          </div>
         </div>
       </div>
 
-      {/* Tabs & Search Filter Bar */}
-      <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs space-y-3">
+      {/* Filter and Search Bar */}
+      <div className="bg-white rounded-lg border border-slate-200 p-3 shadow-2xs space-y-3">
         {/* Search */}
-        <div className="relative w-full">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+        <div className="relative">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input
             type="text"
+            placeholder="Search student, mobile, batch..."
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search student, mobile, batch..."
-            className="w-full text-xs pl-9 pr-3 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-brand-700 focus:bg-white"
+            className="w-full pl-9 pr-4 py-1.5 text-xs rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500"
           />
+          {searchQuery && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs"
+            >
+              Clear
+            </button>
+          )}
         </div>
 
-        {/* Navigation Tabs (Smoothly scrollable horizontal chips) */}
-        <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap scrollbar-none pb-1 text-xs">
+        {/* Status Tabs */}
+        <div className="flex items-center gap-1.5 overflow-x-auto pb-1 text-xs no-scrollbar">
           <button
             type="button"
             onClick={() => setActiveTab('all_pending')}
-            className={`px-3 py-1.5 rounded-full font-semibold transition-colors flex items-center gap-1.5 shrink-0 ${
+            className={`px-3 py-1.5 rounded-full font-semibold transition-colors shrink-0 ${
               activeTab === 'all_pending'
                 ? 'bg-brand-700 text-white shadow-2xs'
                 : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -326,6 +365,13 @@ export const FeesView: React.FC<FeesViewProps> = ({
             {/* Mobile Card List (< md) */}
             <div className="md:hidden divide-y divide-slate-100">
               {filteredCycles.map(cycle => {
+                const student = studentsMap.get(cycle.studentId);
+                const studentName = student?.fullName || cycle.studentName || 'Student';
+                const studentCode = student?.studentId || cycle.studentCode || '';
+                const mobileNumber = student?.mobileNumber || cycle.mobileNumber || '';
+                const batchName = student?.batchName || cycle.batchName || 'Unassigned';
+                const planName = student?.feePlan || cycle.planName || 'Monthly Regular';
+
                 const isPaid = cycle.paymentStatus === 'PAID' || cycle.status === 'PAID';
                 const isOverdue = cycle.paymentStatus === 'OVERDUE';
                 const isDueToday = cycle.paymentStatus === 'DUE TODAY';
@@ -344,10 +390,10 @@ export const FeesView: React.FC<FeesViewProps> = ({
                           onClick={() => onViewStudentById(cycle.studentId)}
                           className="font-bold text-slate-900 text-sm text-left hover:text-brand-700 transition-colors leading-snug block"
                         >
-                          {cycle.studentName}
+                          {studentName}
                         </button>
                         <span className="font-mono text-[10px] text-slate-400">
-                          {cycle.studentCode}
+                          {studentCode}
                         </span>
                       </div>
 
@@ -384,34 +430,34 @@ export const FeesView: React.FC<FeesViewProps> = ({
                     <div className="flex items-center justify-between text-xs bg-slate-50/80 p-2 rounded-lg border border-slate-100 gap-2">
                       <div className="min-w-0">
                         <div className="font-semibold text-slate-800 truncate text-[11px]">
-                          {cycle.batchName}
+                          {batchName}
                         </div>
                         <div className="text-[10px] text-slate-500">
-                          {cycle.planName} ({cycle.durationMonths} mo)
+                          {planName} ({cycle.durationMonths} mo)
                         </div>
                       </div>
 
                       <div className="flex items-center gap-1.5 shrink-0">
                         <a
-                          href={`tel:${cycle.mobileNumber}`}
+                          href={`tel:${mobileNumber}`}
                           className="inline-flex items-center gap-1 px-2 py-1 rounded bg-white text-slate-700 border border-slate-200 text-[11px] font-medium active:scale-95 shadow-2xs hover:bg-slate-50"
                           title="Call"
                         >
                           <Phone className="w-3 h-3 text-brand-700" />
-                          <span>{cycle.mobileNumber}</span>
+                          <span>{mobileNumber}</span>
                         </a>
                         <button
                           type="button"
                           onClick={() =>
                             onOpenWhatsApp(
-                              cycle.mobileNumber || '',
-                              cycle.studentName || 'Student',
+                              mobileNumber || '',
+                              studentName,
                               isOverdue ? 'overdue_reminder' : 'fee_reminder',
                               {
                                 amount: cycle.outstandingAmount,
                                 dueDate: formatDate(cycle.nextDueDate),
                                 daysOverdue: cycle.daysOverdue || 0,
-                                batchName: cycle.batchName,
+                                batchName: batchName,
                                 period: `${formatDate(cycle.periodStartDate)} to ${formatDate(cycle.periodEndDate)}`,
                               }
                             )
@@ -490,6 +536,13 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {filteredCycles.map(cycle => {
+                    const student = studentsMap.get(cycle.studentId);
+                    const studentName = student?.fullName || cycle.studentName || 'Student';
+                    const studentCode = student?.studentId || cycle.studentCode || '';
+                    const mobileNumber = student?.mobileNumber || cycle.mobileNumber || '';
+                    const batchName = student?.batchName || cycle.batchName || 'Unassigned';
+                    const planName = student?.feePlan || cycle.planName || 'Monthly Regular';
+
                     return (
                       <tr key={cycle.id} className="hover:bg-slate-50/70 transition-colors">
                         {/* Student Info */}
@@ -499,20 +552,20 @@ export const FeesView: React.FC<FeesViewProps> = ({
                             onClick={() => onViewStudentById(cycle.studentId)}
                             className="font-semibold text-slate-900 hover:text-brand-700 text-left block"
                           >
-                            {cycle.studentName}
+                            {studentName}
                           </button>
                           <div className="text-[10px] text-slate-400 font-mono">
-                            {cycle.studentCode} • 📱 {cycle.mobileNumber}
+                            {studentCode} • 📱 {mobileNumber}
                           </div>
                         </td>
 
                         {/* Batch & Plan */}
                         <td className="py-2.5 px-4">
                           <div className="text-slate-800 font-medium max-w-[150px] truncate">
-                            {cycle.batchName}
+                            {batchName}
                           </div>
                           <div className="text-[10px] text-slate-500">
-                            {cycle.planName} ({cycle.durationMonths} mo)
+                            {planName} ({cycle.durationMonths} mo)
                           </div>
                         </td>
 
@@ -578,51 +631,69 @@ export const FeesView: React.FC<FeesViewProps> = ({
                         </td>
 
                         {/* Status Badge */}
-                        <td className="py-2.5 px-4">
-                          {cycle.paymentStatus === 'PAID' && (
-                            <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                              <CheckCircle2 className="w-3 h-3" /> Paid
-                            </span>
-                          )}
-                          {cycle.paymentStatus === 'OVERDUE' && (
-                            <span className="inline-flex items-center gap-1 text-rose-700 font-bold bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
-                              <AlertTriangle className="w-3 h-3" /> Overdue
-                            </span>
-                          )}
-                          {cycle.paymentStatus === 'DUE TODAY' && (
-                            <span className="inline-flex items-center gap-1 text-amber-800 font-bold bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
-                              <Clock className="w-3 h-3" /> Due Today
-                            </span>
-                          )}
-                          {cycle.paymentStatus === 'UPCOMING' && (
-                            <span className="inline-flex items-center gap-1 text-blue-700 font-semibold bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
-                              <Calendar className="w-3 h-3" /> Upcoming
-                            </span>
-                          )}
-                          {cycle.paymentStatus === 'PARTIALLY PAID' && (
-                            <span className="inline-flex items-center gap-1 text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded border border-purple-200">
-                              <Clock className="w-3 h-3" /> Partial
-                            </span>
-                          )}
+                        <td className="py-2.5 px-4 whitespace-nowrap">
+                          {(() => {
+                            const effectiveStatus = cycle.paymentStatus || cycle.status;
+                            if (effectiveStatus === 'PAID') {
+                              return (
+                                <span className="inline-flex items-center gap-1 text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                                  <CheckCircle2 className="w-3 h-3" /> Paid
+                                </span>
+                              );
+                            }
+                            if (effectiveStatus === 'OVERDUE') {
+                              return (
+                                <span className="inline-flex items-center gap-1 text-rose-700 font-bold bg-rose-50 px-2 py-0.5 rounded border border-rose-200">
+                                  <AlertTriangle className="w-3 h-3" /> Overdue
+                                </span>
+                              );
+                            }
+                            if (effectiveStatus === 'DUE TODAY') {
+                              return (
+                                <span className="inline-flex items-center gap-1 text-amber-800 font-bold bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                                  <Clock className="w-3 h-3" /> Due Today
+                                </span>
+                              );
+                            }
+                            if (effectiveStatus === 'UPCOMING') {
+                              return (
+                                <span className="inline-flex items-center gap-1 text-blue-700 font-semibold bg-blue-50 px-2 py-0.5 rounded border border-blue-200">
+                                  <Calendar className="w-3 h-3" /> Upcoming
+                                </span>
+                              );
+                            }
+                            if (effectiveStatus === 'PARTIALLY PAID') {
+                              return (
+                                <span className="inline-flex items-center gap-1 text-purple-700 font-bold bg-purple-50 px-2 py-0.5 rounded border border-purple-200">
+                                  <Clock className="w-3 h-3" /> Partial
+                                </span>
+                              );
+                            }
+                            return (
+                              <span className="inline-flex items-center gap-1 text-slate-600 bg-slate-100 px-2 py-0.5 rounded border border-slate-200">
+                                {effectiveStatus}
+                              </span>
+                            );
+                          })()}
                         </td>
 
                         {/* Actions */}
                         <td className="py-2.5 px-4 text-right">
                           <div className="flex items-center justify-end gap-1.5">
-                            {cycle.paymentStatus !== 'PAID' ? (
+                            {(cycle.paymentStatus || cycle.status) !== 'PAID' ? (
                               <>
                                 <button
                                   type="button"
                                   onClick={() =>
                                     onOpenWhatsApp(
-                                      cycle.mobileNumber || '',
-                                      cycle.studentName || 'Student',
-                                      cycle.paymentStatus === 'OVERDUE' ? 'overdue_reminder' : 'fee_reminder',
+                                      mobileNumber || '',
+                                      studentName,
+                                      (cycle.paymentStatus || cycle.status) === 'OVERDUE' ? 'overdue_reminder' : 'fee_reminder',
                                       {
                                         amount: cycle.outstandingAmount,
                                         dueDate: formatDate(cycle.nextDueDate),
                                         daysOverdue: cycle.daysOverdue || 0,
-                                        batchName: cycle.batchName,
+                                        batchName: batchName,
                                         period: `${formatDate(cycle.periodStartDate)} to ${formatDate(cycle.periodEndDate)}`,
                                       }
                                     )

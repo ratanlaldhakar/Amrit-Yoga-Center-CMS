@@ -17,6 +17,7 @@ import {
   DiscountType,
   Gender,
   StudentStatus,
+  UpdateReceiptPaymentParams,
 } from '../types';
 import {
   initialBatches,
@@ -266,7 +267,7 @@ class StorageService {
     let studentsModified = false;
     let cyclesModified = false;
 
-    // Normalize student membership cycle fields
+    // Normalize student membership cycle fields to current month if prior to 2026-09
     this.students.forEach(s => {
       const batch = this.batches.find(b => b.id === s.batchId);
       const baseFee = s.baseFee || s.monthlyFee || (batch ? batch.monthlyFee : 1800);
@@ -274,11 +275,11 @@ class StorageService {
       const discVal = s.discountValue || 0;
       const { discountAmount, finalAmount } = calculateDiscount(baseFee, discType, discVal);
 
-      if (!s.billingStartDate || !s.nextDueDate || !s.paidThroughDate) {
+      if (!s.billingStartDate || !s.nextDueDate || !s.paidThroughDate || s.nextDueDate < '2026-09-01') {
         studentsModified = true;
-        const joinDate = s.joiningDate || '2026-09-02';
+        const joinDate = s.joiningDate || '2026-09-10';
         const joinDay = parseInt(joinDate.split('-')[2] || '10', 10);
-        const joinDayPadded = String(joinDay).padStart(2, '0');
+        const joinDayPadded = String(Math.min(joinDay, 30)).padStart(2, '0');
         const startDate = `2026-09-${joinDayPadded}`;
         const duration = s.planDurationMonths || (s.feePlan?.includes('3') ? 3 : 1);
         const period = calculateBillingPeriod(startDate, duration);
@@ -307,14 +308,284 @@ class StorageService {
       cyclesModified = true;
     }
 
-    // Synchronize cycle statuses
+    // Deduplicate billing cycles per student (prioritize PAID cycle if available)
+    const cycleMap = new Map<string, BillingCycle>();
+    for (const c of this.billingCycles) {
+      const existing = cycleMap.get(c.studentId);
+      if (!existing) {
+        cycleMap.set(c.studentId, c);
+      } else {
+        cyclesModified = true;
+        if (c.status === 'PAID' && existing.status !== 'PAID') {
+          cycleMap.set(c.studentId, c);
+        } else if (existing.status !== 'PAID' && c.dueDate > existing.dueDate) {
+          cycleMap.set(c.studentId, c);
+        }
+      }
+    }
+    this.billingCycles = Array.from(cycleMap.values());
+
     const today = new Date();
+    // Anchor unpaid historical cycles to September 2026 on joining day
+    this.billingCycles.forEach(c => {
+      if (c.status !== 'PAID' && c.dueDate && c.dueDate < '2026-09-01') {
+        const joinDay = parseInt((c.dueDate || '2026-09-10').split('-')[2], 10) || 10;
+        const joinDayPadded = String(Math.min(joinDay, 30)).padStart(2, '0');
+        const startDate = `2026-09-${joinDayPadded}`;
+        const duration = c.durationMonths || 1;
+        const period = calculateBillingPeriod(startDate, duration);
+        c.periodStartDate = period.periodStartDate;
+        c.periodEndDate = period.periodEndDate;
+        c.dueDate = startDate;
+        c.nextDueDate = startDate;
+        cyclesModified = true;
+      }
+    });
+
+    const existingStudentCycleIds = new Set(this.billingCycles.map(c => c.studentId));
+
+    this.students.forEach(s => {
+      if (s.status === 'Active' && !existingStudentCycleIds.has(s.id)) {
+        const batch = this.batches.find(b => b.id === s.batchId);
+        const batchName = batch ? batch.batchName : (s.batchName || 'Unassigned');
+        const baseAmount = s.baseFee || s.monthlyFee || (batch ? batch.monthlyFee : 1800);
+        const discountType = s.discountType || 'NONE';
+        const discountValue = s.discountValue || 0;
+        const discountAmount = s.discountAmount || 0;
+        const finalAmount = s.finalFee || s.monthlyFee || Math.max(0, baseAmount - discountAmount);
+
+        const joinDay = parseInt((s.joiningDate || '2026-09-10').split('-')[2], 10) || 10;
+        const joinDayPadded = String(Math.min(joinDay, 30)).padStart(2, '0');
+        const startDate = `2026-09-${joinDayPadded}`;
+        const duration = s.planDurationMonths || 1;
+        const period = calculateBillingPeriod(startDate, duration);
+        const dueDate = startDate;
+
+        const { status, daysOverdue } = calculateCycleStatus(dueDate, finalAmount, 0, today);
+
+        const newCycle: BillingCycle = {
+          id: `bc-${s.id}-202609`,
+          studentId: s.id,
+          studentName: s.fullName,
+          studentCode: s.studentId,
+          mobileNumber: s.mobileNumber,
+          batchId: s.batchId || '',
+          batchName,
+          planName: s.feePlan || 'Monthly Regular',
+          durationMonths: duration,
+          cycleNumber: 1,
+          periodStartDate: period.periodStartDate,
+          periodEndDate: period.periodEndDate,
+          dueDate,
+          nextDueDate: dueDate,
+          baseAmount,
+          discountType,
+          discountValue,
+          discountAmount,
+          discountNote: s.discountNote || s.discountReason,
+          finalAmount,
+          payableAmount: finalAmount,
+          amountPaid: 0,
+          outstandingAmount: finalAmount,
+          status,
+          paymentStatus: status,
+          daysOverdue,
+          notes: 'September 2026 cycle anchored on joining day',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        this.billingCycles.push(newCycle);
+        existingStudentCycleIds.add(s.id);
+        cyclesModified = true;
+        supabaseSyncService.syncBillingCycle(newCycle);
+      }
+    });
+
+    // Keep billing cycles in sync with student details (name, student code, batch, mobile, fees)
+    this.billingCycles.forEach(c => {
+      const student = this.students.find(s => s.id === c.studentId);
+      if (student) {
+        const batch = this.batches.find(b => b.id === student.batchId);
+        const expectedBatchName = batch ? batch.batchName : (student.batchName || 'Unassigned');
+
+        let cycleChanged = false;
+        if (c.studentName !== student.fullName) {
+          c.studentName = student.fullName;
+          cycleChanged = true;
+        }
+        if (c.studentCode !== student.studentId) {
+          c.studentCode = student.studentId;
+          cycleChanged = true;
+        }
+        if (c.mobileNumber !== student.mobileNumber) {
+          c.mobileNumber = student.mobileNumber;
+          cycleChanged = true;
+        }
+        if (c.batchId !== (student.batchId || '') || c.batchName !== expectedBatchName) {
+          c.batchId = student.batchId || '';
+          c.batchName = expectedBatchName;
+          cycleChanged = true;
+        }
+        // If cycle is not settled, also keep plan and fee amounts in sync
+        const isSettled = (c.status === 'PAID' || c.paymentStatus === 'PAID');
+        if (!isSettled && (c.amountPaid || 0) === 0 && student.finalFee > 0) {
+          if (c.planName !== student.feePlan || c.finalAmount !== student.finalFee) {
+            c.planName = student.feePlan || c.planName;
+            c.baseAmount = student.baseFee || student.finalFee;
+            c.discountType = student.discountType || 'NONE';
+            c.discountValue = student.discountValue || 0;
+            c.discountAmount = student.discountAmount || 0;
+            c.discountNote = student.discountNote || student.discountReason;
+            c.finalAmount = student.finalFee;
+            c.payableAmount = student.finalFee;
+            c.outstandingAmount = student.finalFee;
+            cycleChanged = true;
+          }
+        }
+
+        if (cycleChanged) {
+          cyclesModified = true;
+          supabaseSyncService.syncBillingCycle(c);
+        }
+      }
+    });
+
+    // Synchronize cycle statuses
     this.billingCycles.forEach(c => {
       const { status, daysOverdue } = calculateCycleStatus(c.dueDate, c.outstandingAmount, c.amountPaid, today);
-      if (c.status !== status || c.daysOverdue !== daysOverdue) {
+      if (c.status !== status || c.daysOverdue !== daysOverdue || c.paymentStatus !== status) {
         c.status = status;
+        c.paymentStatus = status;
         c.daysOverdue = daysOverdue;
         cyclesModified = true;
+      }
+    });
+
+    // Reconcile settled/PAID billing cycles with receipts and payments
+    this.billingCycles.forEach(c => {
+      const isSettled = (c.status === 'PAID' || c.paymentStatus === 'PAID' || (c.amountPaid || 0) > 0);
+      if (isSettled && (c.amountPaid || 0) > 0) {
+        let payment = this.payments.find(p => p.billingCycleId === c.id || (c.receiptNo && p.receiptNo === c.receiptNo));
+        let receipt = this.receipts.find(r => (c.receiptNo && r.receiptNo === c.receiptNo) || (payment && r.paymentId === payment.id));
+
+        if (!c.receiptNo && receipt) {
+          c.receiptNo = receipt.receiptNo;
+          cyclesModified = true;
+          supabaseSyncService.syncBillingCycle(c);
+        }
+
+        if (!receipt && !payment) {
+          const recNo = c.receiptNo || this.generateNextReceiptNumber();
+          if (!c.receiptNo) {
+            c.receiptNo = recNo;
+            cyclesModified = true;
+            supabaseSyncService.syncBillingCycle(c);
+          }
+          const paymentId = `pay-${c.id}-${Date.now()}`;
+          const displayPeriod = `${c.periodStartDate} to ${c.periodEndDate}`;
+          payment = {
+            id: paymentId,
+            receiptNo: recNo,
+            studentId: c.studentId,
+            studentName: c.studentName,
+            studentCode: c.studentCode,
+            billingCycleId: c.id,
+            planName: c.planName,
+            billingPeriod: displayPeriod,
+            billingStartDate: c.periodStartDate,
+            billingEndDate: c.periodEndDate,
+            baseAmount: c.baseAmount,
+            discountAmount: c.discountAmount,
+            amount: c.amountPaid,
+            feeMonth: displayPeriod,
+            paymentDate: c.paymentDate || new Date().toISOString().split('T')[0],
+            paymentMethod: c.paymentMethod || 'UPI',
+            status: 'Valid',
+            collectedBy: 'Admin',
+            createdAt: new Date().toISOString(),
+          };
+          this.payments.push(payment);
+          saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+          supabaseSyncService.syncPayment(payment);
+
+          receipt = {
+            id: `rec-${c.id}-${Date.now()}`,
+            receiptNo: recNo,
+            paymentId: payment.id,
+            studentId: c.studentId,
+            studentName: c.studentName,
+            studentCode: c.studentCode || '',
+            batchName: c.batchName || 'General',
+            planName: c.planName,
+            billingPeriod: displayPeriod,
+            billingStartDate: c.periodStartDate,
+            billingEndDate: c.periodEndDate,
+            baseAmount: c.baseAmount,
+            discountAmount: c.discountAmount,
+            amount: c.amountPaid,
+            outstandingAmount: c.outstandingAmount || 0,
+            nextDueDate: c.nextDueDate,
+            feeMonth: displayPeriod,
+            paymentMethod: c.paymentMethod || 'UPI',
+            issuedDate: c.paymentDate || new Date().toISOString().split('T')[0],
+            status: 'Active',
+          };
+          this.receipts.push(receipt);
+          saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+          supabaseSyncService.syncReceipt(receipt);
+        } else if (!receipt && payment) {
+          receipt = {
+            id: `rec-${c.id}-${Date.now()}`,
+            receiptNo: payment.receiptNo,
+            paymentId: payment.id,
+            studentId: c.studentId,
+            studentName: c.studentName,
+            studentCode: c.studentCode || '',
+            batchName: c.batchName || 'General',
+            planName: c.planName,
+            billingPeriod: payment.billingPeriod || `${c.periodStartDate} to ${c.periodEndDate}`,
+            billingStartDate: c.periodStartDate,
+            billingEndDate: c.periodEndDate,
+            baseAmount: c.baseAmount,
+            discountAmount: c.discountAmount,
+            amount: payment.amount,
+            outstandingAmount: 0,
+            nextDueDate: c.nextDueDate,
+            feeMonth: payment.feeMonth || `${c.periodStartDate} to ${c.periodEndDate}`,
+            paymentMethod: payment.paymentMethod || 'UPI',
+            issuedDate: payment.paymentDate || c.paymentDate || new Date().toISOString().split('T')[0],
+            status: 'Active',
+          };
+          this.receipts.push(receipt);
+          saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+          supabaseSyncService.syncReceipt(receipt);
+        } else if (!payment && receipt) {
+          payment = {
+            id: `pay-${c.id}-${Date.now()}`,
+            receiptNo: receipt.receiptNo,
+            studentId: c.studentId,
+            studentName: c.studentName,
+            studentCode: c.studentCode,
+            billingCycleId: c.id,
+            planName: c.planName,
+            billingPeriod: receipt.billingPeriod || `${c.periodStartDate} to ${c.periodEndDate}`,
+            billingStartDate: c.periodStartDate,
+            billingEndDate: c.periodEndDate,
+            baseAmount: c.baseAmount,
+            discountAmount: c.discountAmount,
+            amount: receipt.amount || c.amountPaid,
+            feeMonth: receipt.feeMonth || `${c.periodStartDate} to ${c.periodEndDate}`,
+            paymentDate: receipt.issuedDate || c.paymentDate || new Date().toISOString().split('T')[0],
+            paymentMethod: receipt.paymentMethod || 'UPI',
+            status: 'Valid',
+            collectedBy: 'Admin',
+            createdAt: new Date().toISOString(),
+          };
+          this.payments.push(payment);
+          saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+          supabaseSyncService.syncPayment(payment);
+        }
       }
     });
 
@@ -389,26 +660,19 @@ class StorageService {
   private migrateLegacyBatches() {
     let modified = false;
 
-    // Normalization mapping for initial seed batches if user loaded from old localStorage
-    const legacyMap: Record<string, { name: string; period: 'Morning' | 'Afternoon' | 'Evening' | 'Other'; start: string; end: string }> = {
-      'b-1': { name: 'General Hatha', period: 'Morning', start: '06:00 AM', end: '07:00 AM' },
-      'b-2': { name: 'Beginner Yoga', period: 'Morning', start: '07:15 AM', end: '08:15 AM' },
-      'b-3': { name: 'Therapy & Gentle', period: 'Morning', start: '08:30 AM', end: '09:30 AM' },
-      'b-4': { name: 'Women Special', period: 'Evening', start: '05:30 PM', end: '06:30 PM' },
-      'b-5': { name: 'Power & Flow', period: 'Evening', start: '06:45 PM', end: '07:45 PM' },
-    };
+    // Ensure b-1 is Yoga Therapy if it was mistakenly renamed General Hatha
+    const b1 = this.batches.find(b => b.id === 'b-1');
+    if (b1 && b1.batchName === 'General Hatha') {
+      b1.batchName = 'Yoga Therapy';
+      b1.startTime = '06:00 AM';
+      b1.endTime = '07:00 AM';
+      b1.sessionPeriod = 'Morning';
+      modified = true;
+      supabaseSyncService.syncBatch(b1);
+    }
 
     this.batches.forEach(b => {
-      if (legacyMap[b.id]) {
-        const target = legacyMap[b.id];
-        if (b.batchName !== target.name || b.sessionPeriod !== target.period) {
-          b.batchName = target.name;
-          b.sessionPeriod = target.period;
-          b.startTime = target.start;
-          b.endTime = target.end;
-          modified = true;
-        }
-      } else if (!b.sessionPeriod || b.batchName.includes('AM') || b.batchName.includes('PM')) {
+      if (!b.sessionPeriod || b.batchName.includes('AM') || b.batchName.includes('PM')) {
         // Parse period
         let period: 'Morning' | 'Afternoon' | 'Evening' | 'Other' = 'Morning';
         if (b.batchName.toLowerCase().includes('evening') || b.startTime.includes('PM')) {
@@ -425,7 +689,7 @@ class StorageService {
           .replace(/afternoon/gi, '')
           .replace(/\d{1,2}:\d{2}\s*(AM|PM)?\s*-\s*\d{1,2}:\d{2}\s*(AM|PM)?/gi, '')
           .replace(/[()]/g, '')
-          .trim() || 'Yoga Batch';
+          .trim() || b.batchName;
         modified = true;
       }
     });
@@ -436,7 +700,7 @@ class StorageService {
       // Sync student batch names
       this.students.forEach(s => {
         const batch = this.batches.find(b => b.id === s.batchId);
-        if (batch) {
+        if (batch && s.batchName !== batch.batchName) {
           s.batchName = batch.batchName;
         }
       });
@@ -452,20 +716,7 @@ class StorageService {
   }
 
   public recalculateOverdues() {
-    const today = new Date();
-    this.feeRecords.forEach(r => {
-      if (r.paymentStatus !== 'PAID') {
-        const days = calculateOverdueDays(r.dueDate, today);
-        r.daysOverdue = days;
-        if (days > 0) {
-          r.paymentStatus = 'OVERDUE';
-        } else {
-          r.paymentStatus = 'PENDING';
-        }
-      } else {
-        r.daysOverdue = 0;
-      }
-    });
+    this.recalculateCycleStatuses();
   }
 
   // --- SETTINGS ---
@@ -578,10 +829,39 @@ class StorageService {
           ...this.batches[index],
           ...batchData,
         };
+        const updatedBatch = this.batches[index];
+
+        // Cascade batchName to all students enrolled in this batch
+        let studentsModified = false;
+        this.students.forEach(s => {
+          if (s.batchId === updatedBatch.id && s.batchName !== updatedBatch.batchName) {
+            s.batchName = updatedBatch.batchName;
+            studentsModified = true;
+            supabaseSyncService.syncStudent(s);
+          }
+        });
+        if (studentsModified) {
+          saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
+        }
+
+        // Cascade batchName to all billing cycles for this batch
+        let cyclesModified = false;
+        this.billingCycles.forEach(c => {
+          if (c.batchId === updatedBatch.id && c.batchName !== updatedBatch.batchName) {
+            c.batchName = updatedBatch.batchName;
+            cyclesModified = true;
+            supabaseSyncService.syncBillingCycle(c);
+          }
+        });
+        if (cyclesModified) {
+          saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+        }
+
         this.recalculateBatchCounts();
         saveToStorage(STORAGE_KEYS.BATCHES, this.batches);
-        supabaseSyncService.syncBatch(this.batches[index]);
-        return this.batches[index];
+        supabaseSyncService.syncBatch(updatedBatch);
+        this.notifyDataChanged();
+        return updatedBatch;
       }
     }
 
@@ -594,6 +874,7 @@ class StorageService {
     this.batches.push(newBatch);
     saveToStorage(STORAGE_KEYS.BATCHES, this.batches);
     supabaseSyncService.syncBatch(newBatch);
+    this.notifyDataChanged();
     return newBatch;
   }
 
@@ -601,6 +882,7 @@ class StorageService {
     this.batches = this.batches.filter(b => b.id !== id);
     saveToStorage(STORAGE_KEYS.BATCHES, this.batches);
     supabaseSyncService.deleteBatch(id);
+    this.notifyDataChanged();
     return true;
   }
 
@@ -668,6 +950,84 @@ class StorageService {
         this.recalculateBatchCounts();
         saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
         supabaseSyncService.syncStudent(updated);
+
+        // Update all related billing cycles for this student
+        let cyclesUpdated = false;
+        const today = new Date();
+        this.billingCycles = this.billingCycles.map(c => {
+          if (c.studentId === updated.id) {
+            cyclesUpdated = true;
+            const updatedCycle: BillingCycle = {
+              ...c,
+              studentName: updated.fullName,
+              studentCode: updated.studentId,
+              mobileNumber: updated.mobileNumber,
+              batchId: updated.batchId || '',
+              batchName: updated.batchName || 'Unassigned',
+              updatedAt: new Date().toISOString(),
+            };
+
+            // If the cycle is not settled, also keep plan and fee amounts in sync
+            const isSettled = (c.status === 'PAID' || c.paymentStatus === 'PAID');
+            if (!isSettled && (c.amountPaid || 0) === 0) {
+              updatedCycle.planName = updated.feePlan || c.planName;
+              updatedCycle.baseAmount = updated.baseFee || updated.finalFee;
+              updatedCycle.discountType = updated.discountType;
+              updatedCycle.discountValue = updated.discountValue;
+              updatedCycle.discountAmount = updated.discountAmount;
+              updatedCycle.discountNote = updated.discountNote || updated.discountReason;
+              updatedCycle.finalAmount = updated.finalFee;
+              updatedCycle.payableAmount = updated.finalFee;
+              updatedCycle.outstandingAmount = updated.finalFee;
+
+              const { status, daysOverdue } = calculateCycleStatus(
+                updatedCycle.dueDate,
+                updatedCycle.outstandingAmount,
+                0,
+                today
+              );
+              updatedCycle.status = status;
+              updatedCycle.paymentStatus = status;
+              updatedCycle.daysOverdue = daysOverdue;
+            }
+
+            supabaseSyncService.syncBillingCycle(updatedCycle);
+            return updatedCycle;
+          }
+          return c;
+        });
+
+        if (cyclesUpdated) {
+          saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+        }
+
+        // Also update studentName in payments and receipts if exists
+        let paymentsUpdated = false;
+        this.payments = this.payments.map(p => {
+          if (p.studentId === updated.id && p.studentName !== updated.fullName) {
+            paymentsUpdated = true;
+            const up = { ...p, studentName: updated.fullName };
+            supabaseSyncService.syncPayment(up);
+            return up;
+          }
+          return p;
+        });
+        if (paymentsUpdated) saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+
+        let receiptsUpdated = false;
+        this.receipts = this.receipts.map(r => {
+          if (r.studentId === updated.id && r.studentName !== updated.fullName) {
+            receiptsUpdated = true;
+            const ur = { ...r, studentName: updated.fullName };
+            supabaseSyncService.syncReceipt(ur);
+            return ur;
+          }
+          return r;
+        });
+        if (receiptsUpdated) saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+
+        this.recalculateCycleStatuses();
+        this.notifyDataChanged();
         return updated;
       }
     }
@@ -719,12 +1079,56 @@ class StorageService {
     saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
     supabaseSyncService.syncStudent(newStudent);
 
+    // Also create initial billing cycle for the new student
+    const today = new Date();
+    const dueDate = period.nextDueDate || period.periodStartDate;
+    const { status: cycleStatus, daysOverdue } = calculateCycleStatus(dueDate, finalAmount, 0, today);
+    const newCycle: BillingCycle = {
+      id: `bc-${newStudent.id}-${Date.now()}`,
+      studentId: newStudent.id,
+      studentName: newStudent.fullName,
+      studentCode: newStudent.studentId,
+      mobileNumber: newStudent.mobileNumber,
+      batchId: newStudent.batchId || '',
+      batchName: newStudent.batchName || 'Unassigned',
+      planName: newStudent.feePlan || 'Monthly Regular',
+      durationMonths: duration,
+      cycleNumber: 1,
+      periodStartDate: period.periodStartDate,
+      periodEndDate: period.periodEndDate,
+      dueDate,
+      nextDueDate: dueDate,
+      baseAmount: baseFee,
+      discountType: discType,
+      discountValue: discVal,
+      discountAmount,
+      discountNote: studentData.discountNote || undefined,
+      finalAmount,
+      payableAmount: finalAmount,
+      amountPaid: 0,
+      outstandingAmount: finalAmount,
+      status: cycleStatus,
+      paymentStatus: cycleStatus,
+      daysOverdue,
+      notes: studentData.notes || 'Initial membership cycle',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    this.billingCycles.unshift(newCycle);
+    saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+    supabaseSyncService.syncBillingCycle(newCycle);
+
+    this.recalculateCycleStatuses();
+    this.notifyDataChanged();
+
     return newStudent;
   }
 
   saveStudentsBulk(studentsData: (Partial<Student> & { fullName: string; mobileNumber: string; batchId?: string })[]): Student[] {
     const createdStudents: Student[] = [];
+    const createdCycles: BillingCycle[] = [];
     const year = new Date().getFullYear();
+    const today = new Date();
 
     for (let i = 0; i < studentsData.length; i++) {
       const item = studentsData[i];
@@ -738,12 +1142,16 @@ class StorageService {
       const nextSeq = this.students.length + createdStudents.length + 1;
       const studentId = `AYC-${year}-${String(nextSeq).padStart(3, '0')}`;
 
-      const joinDate = item.joiningDate || new Date().toISOString().split('T')[0];
+      const joinDate = item.joiningDate || today.toISOString().split('T')[0];
       const duration = item.planDurationMonths || 1;
       const period = calculateBillingPeriod(joinDate, duration);
+      const dueDate = period.nextDueDate || period.periodStartDate;
 
+      const { status: cycleStatus, daysOverdue } = calculateCycleStatus(dueDate, finalAmount, 0, today);
+
+      const studentUid = `s-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 7)}`;
       const newStudent: Student = {
-        id: `s-${Date.now()}-${i}-${Math.random().toString(36).substring(2, 7)}`,
+        id: studentUid,
         studentId,
         fullName: item.fullName.trim(),
         parentName: (item.parentName || '').trim(),
@@ -768,7 +1176,7 @@ class StorageService {
         billingStartDate: period.periodStartDate,
         paidThroughDate: period.periodEndDate,
         nextDueDate: period.nextDueDate,
-        billingStatus: 'PAID',
+        billingStatus: cycleStatus,
         status: item.status || 'Active',
         notes: item.notes || '',
         createdAt: new Date().toISOString(),
@@ -776,10 +1184,50 @@ class StorageService {
       };
 
       createdStudents.push(newStudent);
+
+      // Create initial billing cycle for imported active student
+      if (newStudent.status === 'Active') {
+        const newCycle: BillingCycle = {
+          id: `bc-${newStudent.id}-${Date.now()}-${i}`,
+          studentId: newStudent.id,
+          studentName: newStudent.fullName,
+          studentCode: newStudent.studentId,
+          mobileNumber: newStudent.mobileNumber,
+          batchId: newStudent.batchId || '',
+          batchName,
+          planName: newStudent.feePlan,
+          durationMonths: duration,
+          cycleNumber: 1,
+          periodStartDate: period.periodStartDate,
+          periodEndDate: period.periodEndDate,
+          dueDate,
+          nextDueDate: dueDate,
+          baseAmount: baseFee,
+          discountType: discType,
+          discountValue: discVal,
+          discountAmount,
+          discountNote: item.discountNote || undefined,
+          finalAmount,
+          payableAmount: finalAmount,
+          amountPaid: 0,
+          outstandingAmount: finalAmount,
+          status: cycleStatus,
+          paymentStatus: cycleStatus,
+          daysOverdue,
+          notes: item.notes || 'Initial cycle from bulk import',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        createdCycles.push(newCycle);
+      }
     }
 
-    // Add newly created students to state in bulk
+    // Add newly created students and cycles to state in bulk
     this.students.unshift(...createdStudents);
+    if (createdCycles.length > 0) {
+      this.billingCycles.unshift(...createdCycles);
+      saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+    }
     this.recalculateBatchCounts();
     saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
 
@@ -787,8 +1235,36 @@ class StorageService {
     for (const s of createdStudents) {
       supabaseSyncService.syncStudent(s);
     }
+    for (const c of createdCycles) {
+      supabaseSyncService.syncBillingCycle(c);
+    }
+
+    this.notifyDataChanged();
 
     return createdStudents;
+  }
+
+  // Guaranteed Unique Sequential Receipt Number Generator
+  public generateNextReceiptNumber(): string {
+    const existingReceiptNums = [
+      ...this.receipts.map(r => r.receiptNo || ''),
+      ...this.billingCycles.map(c => c.receiptNo || ''),
+      ...this.payments.map(p => p.receiptNo || '')
+    ].map(no => {
+      const match = no.match(/(\d+)$/);
+      return match ? parseInt(match[1], 10) : 0;
+    });
+
+    const maxExisting = existingReceiptNums.length > 0 ? Math.max(...existingReceiptNums) : 0;
+    const settingsNum = this.settings.nextReceiptNumber || 1050;
+    const nextNum = Math.max(maxExisting + 1, settingsNum);
+
+    this.settings.nextReceiptNumber = nextNum + 1;
+    saveToStorage(STORAGE_KEYS.SETTINGS, this.settings);
+    supabaseSyncService.syncSettings(this.settings);
+
+    const prefix = this.settings.receiptPrefix || 'AYC-2026-';
+    return `${prefix}${nextNum}`;
   }
 
   // --- ATOMIC ENROLLMENT & ADVANCE PAYMENT COLLECTION ---
@@ -892,10 +1368,7 @@ class StorageService {
 
     if (amountPaid > 0) {
       // Generate unique receipt number
-      const currentNum = this.settings.nextReceiptNumber || 1050;
-      receiptNo = `${this.settings.receiptPrefix}${currentNum}`;
-      this.settings.nextReceiptNumber = currentNum + 1;
-      saveToStorage(STORAGE_KEYS.SETTINGS, this.settings);
+      receiptNo = this.generateNextReceiptNumber();
 
       // Generate Payment
       const paymentId = `pay-${Date.now()}`;
@@ -1004,6 +1477,8 @@ class StorageService {
     if (payment) supabaseSyncService.syncPayment(payment);
     if (receipt) supabaseSyncService.syncReceipt(receipt);
 
+    this.notifyDataChanged();
+
     return { student: newStudent, cycle, payment, receipt };
   }
 
@@ -1014,6 +1489,7 @@ class StorageService {
     saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
     saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
     supabaseSyncService.deleteStudent(id);
+    this.notifyDataChanged();
     return true;
   }
 
@@ -1045,7 +1521,7 @@ class StorageService {
         today
       );
 
-      if (cycle.status !== status || cycle.daysOverdue !== daysOverdue) {
+      if (cycle.status !== status || cycle.daysOverdue !== daysOverdue || cycle.paymentStatus !== status) {
         cycle.status = status;
         cycle.paymentStatus = status;
         cycle.daysOverdue = daysOverdue;
@@ -1088,11 +1564,8 @@ class StorageService {
     const payDate = params.paymentDate || new Date().toISOString().split('T')[0];
     const amount = Number(params.amount !== undefined ? params.amount : (params.amountPaid !== undefined ? params.amountPaid : 0));
 
-    // Generate unique receipt number
-    const currentNum = this.settings.nextReceiptNumber || 1050;
-    const receiptNo = `${this.settings.receiptPrefix}${currentNum}`;
-    this.settings.nextReceiptNumber = currentNum + 1;
-    saveToStorage(STORAGE_KEYS.SETTINGS, this.settings);
+    // Generate unique sequential receipt number
+    const receiptNo = this.generateNextReceiptNumber();
 
     let targetCycle: BillingCycle | undefined;
 
@@ -1102,7 +1575,7 @@ class StorageService {
     } else {
       // Find latest unpaid cycle for this student if any
       targetCycle = this.billingCycles.find(
-        c => c.studentId === student.id && (c.status === 'OVERDUE' || c.status === 'DUE TODAY' || c.status === 'PARTIALLY PAID')
+        c => c.studentId === student.id && (c.status !== 'PAID' && c.paymentStatus !== 'PAID') && c.outstandingAmount > 0
       );
     }
 
@@ -1138,6 +1611,7 @@ class StorageService {
 
       const isPaidNow = targetCycle.outstandingAmount === 0;
       targetCycle.status = isPaidNow ? 'PAID' : 'PARTIALLY PAID';
+      targetCycle.paymentStatus = isPaidNow ? 'PAID' : 'PARTIALLY PAID';
       targetCycle.daysOverdue = isPaidNow ? 0 : targetCycle.daysOverdue;
 
       periodStartDate = targetCycle.periodStartDate;
@@ -1302,6 +1776,10 @@ class StorageService {
     supabaseSyncService.syncPayment(payment);
     supabaseSyncService.syncReceipt(receipt);
 
+    this.recalculateBatchCounts();
+    this.recalculateOverdues();
+    this.notifyDataChanged();
+
     return { payment, receipt, student, cycle: cycleToReturn };
   }
 
@@ -1417,7 +1895,7 @@ class StorageService {
     payment.notes = `${payment.notes || ''} [VOIDED: ${reason}]`;
 
     // Also void linked receipt
-    const receipt = this.receipts.find(r => r.paymentId === paymentId);
+    const receipt = this.receipts.find(r => r.paymentId === paymentId || r.receiptNo === payment.receiptNo);
     if (receipt) {
       receipt.status = 'Void';
     }
@@ -1435,16 +1913,232 @@ class StorageService {
       }
     }
 
+    // Reset linked billing cycle to PENDING if applicable
+    if (payment.billingCycleId) {
+      const cycle = this.billingCycles.find(c => c.id === payment.billingCycleId);
+      if (cycle) {
+        // Re-calculate amount paid without this voided payment
+        const remainingPaid = this.payments
+          .filter(p => p.id !== payment.id && p.billingCycleId === cycle.id && p.status === 'Valid')
+          .reduce((sum, p) => sum + p.amount, 0);
+
+        cycle.amountPaid = remainingPaid;
+        cycle.outstandingAmount = Math.max(0, (cycle.finalAmount || cycle.baseAmount || 0) - remainingPaid);
+        if (remainingPaid === 0) {
+          cycle.status = 'PENDING';
+          cycle.paymentStatus = 'PENDING';
+          cycle.paymentDate = undefined;
+          cycle.paymentMethod = undefined;
+        } else {
+          cycle.status = 'PARTIALLY PAID';
+          cycle.paymentStatus = 'PARTIALLY PAID';
+        }
+        supabaseSyncService.syncBillingCycle(cycle);
+      }
+    }
+
     saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
     saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
     saveToStorage(STORAGE_KEYS.FEE_RECORDS, this.feeRecords);
+    saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
 
     // Sync voided status to Supabase
     supabaseSyncService.syncPayment(payment);
     if (receipt) supabaseSyncService.syncReceipt(receipt);
+    this.recalculateCycleStatuses();
     this.notifyDataChanged();
     return true;
   }
+
+  // Update an existing receipt & payment record (corrections for amount, mode, date, ref, notes)
+  updateReceiptPayment(params: UpdateReceiptPaymentParams): {
+    receipt: Receipt;
+    payment: Payment;
+    cycle?: BillingCycle;
+    student?: Student;
+  } {
+    const newAmount = Number(params.amount);
+    if (isNaN(newAmount) || newAmount <= 0) {
+      throw new Error('Valid positive amount is required');
+    }
+
+    const receiptNoClean = (params.receiptNo || '').trim().toUpperCase();
+
+    // 1. Locate receipt
+    let receipt = this.receipts.find(
+      r => r.receiptNo.trim().toUpperCase() === receiptNoClean || r.id === params.receiptNo
+    );
+
+    // 2. Locate payment
+    let payment = this.payments.find(
+      p =>
+        p.receiptNo.trim().toUpperCase() === receiptNoClean ||
+        (receipt && p.id === receipt.paymentId) ||
+        p.id === params.receiptNo
+    );
+
+    if (!receipt && payment) {
+      const p = payment;
+      receipt = this.receipts.find(r => r.paymentId === p.id || r.receiptNo === p.receiptNo);
+    }
+    if (!payment && receipt) {
+      const r = receipt;
+      payment = this.payments.find(p => p.id === r.paymentId || p.receiptNo === r.receiptNo);
+    }
+
+    if (!receipt && !payment) {
+      throw new Error(`Receipt or payment record for "${params.receiptNo}" not found`);
+    }
+
+    const payDate = params.paymentDate || new Date().toISOString().split('T')[0];
+
+    // Compute updated billing period if start and end dates are specified
+    let updatedPeriod = receipt?.billingPeriod || payment?.billingPeriod;
+    if (params.billingStartDate && params.billingEndDate) {
+      updatedPeriod = `${params.billingStartDate} to ${params.billingEndDate}`;
+    }
+
+    // 3. Update Receipt
+    if (receipt) {
+      receipt.amount = newAmount;
+      receipt.paymentMethod = params.paymentMethod;
+      receipt.issuedDate = payDate;
+      if (params.notes !== undefined) {
+        receipt.notes = params.notes;
+      }
+      if (params.billingStartDate) receipt.billingStartDate = params.billingStartDate;
+      if (params.billingEndDate) receipt.billingEndDate = params.billingEndDate;
+      if (updatedPeriod) {
+        receipt.billingPeriod = updatedPeriod;
+        receipt.feeMonth = updatedPeriod;
+      }
+      if (params.planName) receipt.planName = params.planName;
+    }
+
+    // 4. Update Payment
+    if (payment) {
+      payment.amount = newAmount;
+      payment.paymentMethod = params.paymentMethod;
+      payment.paymentDate = payDate;
+      if (params.transactionRef !== undefined) {
+        payment.transactionRef = params.transactionRef;
+      }
+      if (params.notes !== undefined) {
+        payment.notes = params.notes;
+      }
+      if (params.billingStartDate) payment.billingStartDate = params.billingStartDate;
+      if (params.billingEndDate) payment.billingEndDate = params.billingEndDate;
+      if (updatedPeriod) {
+        payment.billingPeriod = updatedPeriod;
+        payment.feeMonth = updatedPeriod;
+      }
+      if (params.planName) payment.planName = params.planName;
+    }
+
+    // 5. Update linked Billing Cycle
+    const studentId = receipt?.studentId || payment?.studentId;
+    let targetCycle: BillingCycle | undefined;
+
+    if (payment?.billingCycleId) {
+      targetCycle = this.billingCycles.find(c => c.id === payment.billingCycleId);
+    }
+    if (!targetCycle && (receipt?.receiptNo || payment?.receiptNo)) {
+      const rNo = (receipt?.receiptNo || payment?.receiptNo)?.trim().toUpperCase();
+      targetCycle = this.billingCycles.find(c => (c.receiptNo || '').trim().toUpperCase() === rNo);
+    }
+    if (!targetCycle && studentId) {
+      const targetStart = params.billingStartDate || receipt?.billingStartDate || payment?.billingStartDate;
+      if (targetStart) {
+        targetCycle = this.billingCycles.find(
+          c => c.studentId === studentId && c.periodStartDate === targetStart
+        );
+      }
+      if (!targetCycle) {
+        targetCycle = this.billingCycles.find(c => c.studentId === studentId);
+      }
+    }
+
+    let student: Student | undefined;
+    if (studentId) {
+      student = this.getStudentById(studentId);
+    }
+
+    if (targetCycle) {
+      // Calculate total paid across all valid payments for this cycle
+      const currentPaymentId = payment?.id;
+      const cycleId = targetCycle.id;
+      const otherPayments = this.payments
+        .filter(p => p.status === 'Valid' && p.id !== currentPaymentId && p.billingCycleId === cycleId)
+        .reduce((sum, p) => sum + p.amount, 0);
+
+      targetCycle.amountPaid = otherPayments + newAmount;
+      const targetTotal = targetCycle.finalAmount || targetCycle.baseAmount || newAmount;
+      targetCycle.outstandingAmount = Math.max(0, targetTotal - targetCycle.amountPaid);
+      targetCycle.paymentDate = payDate;
+      targetCycle.paymentMethod = params.paymentMethod;
+
+      if (params.billingStartDate) targetCycle.periodStartDate = params.billingStartDate;
+      if (params.billingEndDate) targetCycle.periodEndDate = params.billingEndDate;
+      if (params.planName) targetCycle.planName = params.planName;
+
+      // Status calculation
+      const { status, daysOverdue } = calculateCycleStatus(
+        targetCycle.dueDate || targetCycle.periodStartDate,
+        targetCycle.outstandingAmount,
+        targetCycle.amountPaid,
+        new Date()
+      );
+      targetCycle.status = status;
+      targetCycle.paymentStatus = status;
+      targetCycle.daysOverdue = daysOverdue;
+
+      if (receipt) {
+        receipt.outstandingAmount = targetCycle.outstandingAmount;
+      }
+
+      // Update student billing status
+      if (student) {
+        if (targetCycle.status === 'PAID') {
+          student.billingStatus = 'PAID';
+          if (targetCycle.periodEndDate) {
+            student.paidThroughDate = targetCycle.periodEndDate;
+          }
+        } else if (targetCycle.amountPaid > 0) {
+          student.billingStatus = 'PARTIALLY PAID';
+        } else {
+          student.billingStatus = 'PENDING';
+        }
+        student.updatedAt = new Date().toISOString();
+        saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
+        supabaseSyncService.syncStudent(student);
+      }
+
+      saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+      supabaseSyncService.syncBillingCycle(targetCycle);
+    }
+
+    // Save collections
+    saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+    saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+
+    // Sync to Supabase
+    if (payment) supabaseSyncService.syncPayment(payment);
+    if (receipt) supabaseSyncService.syncReceipt(receipt);
+
+    // Recalculate and trigger reactivity
+    this.recalculateBatchCounts();
+    this.recalculateOverdues();
+    this.recalculateCycleStatuses();
+    this.notifyDataChanged();
+
+    return {
+      receipt: receipt || ({} as Receipt),
+      payment: payment || ({} as Payment),
+      cycle: targetCycle,
+      student,
+    };
+  }
+
 
   // --- EXPENSES ---
   getExpenses(): Expense[] {
@@ -1630,25 +2324,35 @@ class StorageService {
   getDashboardMetrics(): DashboardMetrics {
     const activeStudents = this.students.filter(s => s.status === 'Active');
     
-    // New students this month (joining in 2026-09)
-    const currentMonthPrefix = '2026-09';
-    const newStudentsThisMonth = this.students.filter(s => s.joiningDate.startsWith(currentMonthPrefix)).length;
+    // Dynamic month prefix based on current date
+    const now = new Date();
+    const currentMonthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const newStudentsThisMonth = this.students.filter(
+      s => s.joiningDate && s.joiningDate.startsWith(currentMonthPrefix)
+    ).length;
 
     // Fees collected this month
     const validPaymentsThisMonth = this.payments.filter(
-      p => p.status === 'Valid' && p.paymentDate.startsWith(currentMonthPrefix)
+      p => p.status === 'Valid' && p.paymentDate && p.paymentDate.startsWith(currentMonthPrefix)
     );
     const feesCollectedThisMonth = validPaymentsThisMonth.reduce((acc, curr) => acc + curr.amount, 0);
 
-    // Pending fees
-    this.recalculateOverdues();
-    const pendingRecords = this.feeRecords.filter(f => f.paymentStatus === 'PENDING' || f.paymentStatus === 'OVERDUE');
-    const pendingFeesAmount = pendingRecords.reduce((acc, curr) => acc + (curr.amount || curr.outstandingAmount || curr.finalAmount || 0), 0);
-    const overdueCount = this.feeRecords.filter(f => f.paymentStatus === 'OVERDUE').length;
+    // Pending fees & Overdue calculations
+    this.recalculateCycleStatuses();
+    const unpaidCycles = this.billingCycles.filter(
+      f => (f.status || f.paymentStatus) !== 'PAID' && (f.outstandingAmount > 0 || (f.amountPaid === 0 && f.finalAmount > 0))
+    );
+    const pendingFeesAmount = unpaidCycles.reduce((acc, curr) => {
+      const amt = curr.outstandingAmount !== undefined ? curr.outstandingAmount : (curr.finalAmount - (curr.amountPaid || 0));
+      return acc + Math.max(0, amt);
+    }, 0);
+    const overdueCount = this.billingCycles.filter(
+      f => (f.status || f.paymentStatus) === 'OVERDUE'
+    ).length;
 
     // Expenses this month
     const expensesThisMonth = this.expenses
-      .filter(e => e.expenseDate.startsWith(currentMonthPrefix))
+      .filter(e => e.expenseDate && e.expenseDate.startsWith(currentMonthPrefix))
       .reduce((acc, curr) => acc + curr.amount, 0);
 
     const netIncome = feesCollectedThisMonth - expensesThisMonth;
@@ -1728,14 +2432,49 @@ class StorageService {
           this.students = remote.students || [];
           saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
 
-          this.billingCycles = remote.billingCycles || [];
-          saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+          // Intelligently merge cycles, payments, and receipts to prevent wiping local unsynced data
+          if (remote.billingCycles) {
+            const cycleMap = new Map<string, BillingCycle>();
+            remote.billingCycles.forEach(c => cycleMap.set(c.id, c));
+            this.billingCycles.forEach(c => {
+              const remoteC = cycleMap.get(c.id);
+              if (!remoteC) {
+                cycleMap.set(c.id, c);
+                supabaseSyncService.syncBillingCycle(c);
+              } else if ((c.status === 'PAID' || c.paymentStatus === 'PAID') && remoteC.status !== 'PAID') {
+                cycleMap.set(c.id, c);
+                supabaseSyncService.syncBillingCycle(c);
+              }
+            });
+            this.billingCycles = Array.from(cycleMap.values());
+            saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+          }
 
-          this.payments = remote.payments || [];
-          saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+          if (remote.payments) {
+            const paymentMap = new Map<string, Payment>();
+            remote.payments.forEach(p => paymentMap.set(p.id, p));
+            this.payments.forEach(p => {
+              if (!paymentMap.has(p.id)) {
+                paymentMap.set(p.id, p);
+                supabaseSyncService.syncPayment(p);
+              }
+            });
+            this.payments = Array.from(paymentMap.values());
+            saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+          }
 
-          this.receipts = remote.receipts || [];
-          saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+          if (remote.receipts) {
+            const receiptMap = new Map<string, Receipt>();
+            remote.receipts.forEach(r => receiptMap.set(r.id, r));
+            this.receipts.forEach(r => {
+              if (!receiptMap.has(r.id)) {
+                receiptMap.set(r.id, r);
+                supabaseSyncService.syncReceipt(r);
+              }
+            });
+            this.receipts = Array.from(receiptMap.values());
+            saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+          }
 
           this.expenses = remote.expenses || [];
           saveToStorage(STORAGE_KEYS.EXPENSES, this.expenses);
@@ -1761,6 +2500,7 @@ class StorageService {
             saveToStorage(STORAGE_KEYS.USERS, this.users);
           }
 
+          this.normalizeStudentsAndCycles();
           this.recalculateBatchCounts();
           this.recalculateOverdues();
           this.notifyDataChanged();
@@ -1800,14 +2540,48 @@ class StorageService {
       this.students = res.students || [];
       saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
 
-      this.billingCycles = res.billingCycles || [];
-      saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+      if (res.billingCycles) {
+        const cycleMap = new Map<string, BillingCycle>();
+        res.billingCycles.forEach(c => cycleMap.set(c.id, c));
+        this.billingCycles.forEach(c => {
+          const remoteC = cycleMap.get(c.id);
+          if (!remoteC) {
+            cycleMap.set(c.id, c);
+            supabaseSyncService.syncBillingCycle(c);
+          } else if ((c.status === 'PAID' || c.paymentStatus === 'PAID') && remoteC.status !== 'PAID') {
+            cycleMap.set(c.id, c);
+            supabaseSyncService.syncBillingCycle(c);
+          }
+        });
+        this.billingCycles = Array.from(cycleMap.values());
+        saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+      }
 
-      this.payments = res.payments || [];
-      saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+      if (res.payments) {
+        const paymentMap = new Map<string, Payment>();
+        res.payments.forEach(p => paymentMap.set(p.id, p));
+        this.payments.forEach(p => {
+          if (!paymentMap.has(p.id)) {
+            paymentMap.set(p.id, p);
+            supabaseSyncService.syncPayment(p);
+          }
+        });
+        this.payments = Array.from(paymentMap.values());
+        saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+      }
 
-      this.receipts = res.receipts || [];
-      saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+      if (res.receipts) {
+        const receiptMap = new Map<string, Receipt>();
+        res.receipts.forEach(r => receiptMap.set(r.id, r));
+        this.receipts.forEach(r => {
+          if (!receiptMap.has(r.id)) {
+            receiptMap.set(r.id, r);
+            supabaseSyncService.syncReceipt(r);
+          }
+        });
+        this.receipts = Array.from(receiptMap.values());
+        saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+      }
 
       this.expenses = res.expenses || [];
       saveToStorage(STORAGE_KEYS.EXPENSES, this.expenses);
@@ -1832,6 +2606,7 @@ class StorageService {
         }));
         saveToStorage(STORAGE_KEYS.USERS, this.users);
       }
+      this.normalizeStudentsAndCycles();
       this.recalculateBatchCounts();
       this.recalculateOverdues();
       this.notifyDataChanged();

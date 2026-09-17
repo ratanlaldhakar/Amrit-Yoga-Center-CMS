@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Batch, Student, SessionPeriod } from '../../types';
 import { storageService } from '../../services/storageService';
 import { formatINR } from '../../lib/formatters';
@@ -38,6 +38,14 @@ export const BatchesView: React.FC<BatchesViewProps> = ({ onViewStudent }) => {
       setActiveBatchId(updated[0].id);
     }
   };
+
+  useEffect(() => {
+    const handleUpdate = () => {
+      refreshBatches();
+    };
+    window.addEventListener('amrit_data_updated', handleUpdate);
+    return () => window.removeEventListener('amrit_data_updated', handleUpdate);
+  }, [activeBatchId]);
 
   const handleEdit = (b: Batch) => {
     setSelectedBatchForEdit(b);

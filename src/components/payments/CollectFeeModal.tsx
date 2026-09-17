@@ -322,8 +322,11 @@ export const CollectFeeModal: React.FC<CollectFeeModalProps> = ({
           ? `${effectiveMonths} Months Custom Plan`
           : 'Monthly Regular';
 
+      const targetCycleId = studentStatusMap.get(studentId)?.cycle?.id;
+
       const { receipt, student } = storageService.collectPaymentForCycle({
         studentId,
+        cycleId: targetCycleId,
         cycleStartDate,
         planName,
         durationMonths: effectiveMonths,
@@ -688,7 +691,7 @@ export const CollectFeeModal: React.FC<CollectFeeModalProps> = ({
                 <input
                   type="number"
                   min="0"
-                  step="50"
+                  step="any"
                   value={baseAmount}
                   onChange={e => setBaseAmount(Number(e.target.value))}
                   className="w-full text-xs rounded border border-slate-300 pl-7 pr-3 py-2 bg-white text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-brand-700"

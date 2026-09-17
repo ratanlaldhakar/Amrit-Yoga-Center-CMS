@@ -146,7 +146,7 @@ export function billingCycleToSupabase(bc: BillingCycle) {
     final_amount: bc.finalAmount,
     amount_paid: bc.amountPaid || 0,
     outstanding_amount: bc.outstandingAmount || 0,
-    status: bc.status || 'PENDING',
+    status: bc.status || bc.paymentStatus || 'PENDING',
     days_overdue: bc.daysOverdue || 0,
     payment_date: bc.paymentDate || null,
     payment_method: bc.paymentMethod || null,
@@ -157,6 +157,7 @@ export function billingCycleToSupabase(bc: BillingCycle) {
 }
 
 export function supabaseToBillingCycle(row: any): BillingCycle {
+  const cycleStatus = row.status || row.payment_status || 'PENDING';
   return {
     id: row.id,
     studentId: row.student_id,
@@ -179,7 +180,8 @@ export function supabaseToBillingCycle(row: any): BillingCycle {
     finalAmount: Number(row.final_amount),
     amountPaid: Number(row.amount_paid) || 0,
     outstandingAmount: Number(row.outstanding_amount) || 0,
-    status: row.status,
+    status: cycleStatus,
+    paymentStatus: cycleStatus,
     daysOverdue: Number(row.days_overdue) || 0,
     paymentDate: row.payment_date || undefined,
     paymentMethod: row.payment_method || undefined,

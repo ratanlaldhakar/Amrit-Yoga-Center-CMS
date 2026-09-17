@@ -302,3 +302,15 @@ export interface DashboardMetrics {
   newEnquiriesCount: number;
   upcomingTrialsCount: number;
 }
+
+export interface UpdateReceiptPaymentParams {
+  receiptNo: string;
+  amount: number;
+  paymentMethod: PaymentMethod;
+  paymentDate: string;
+  transactionRef?: string;
+  notes?: string;
+  billingStartDate?: string;
+  billingEndDate?: string;
+  planName?: string;
+}

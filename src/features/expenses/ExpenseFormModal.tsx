@@ -180,10 +180,10 @@ export const ExpenseFormModal: React.FC<ExpenseFormModalProps> = ({
               <span className="absolute left-3 top-2 text-slate-400 font-semibold">₹</span>
               <input
                 type="number"
-                min="1"
-                step="10"
+                min="0.01"
+                step="any"
                 value={amount}
-                onChange={e => setAmount(Number(e.target.value))}
+                onChange={e => setAmount(e.target.value === '' ? '' : Number(e.target.value))}
                 placeholder="2500"
                 className="w-full text-sm rounded-md border border-slate-300 pl-8 pr-3 py-2 bg-white text-slate-900 font-semibold focus:outline-none focus:ring-1 focus:ring-brand-700"
                 required

@@ -584,7 +584,7 @@ export const BatchFormModal: React.FC<BatchFormModalProps> = ({
               <input
                 type="number"
                 min="0"
-                step="50"
+                step="any"
                 value={monthlyFee}
                 onChange={e => setMonthlyFee(Number(e.target.value))}
                 className="w-full text-sm rounded-md border border-slate-300 pl-8 pr-3 py-2 bg-white text-slate-900 font-semibold focus:outline-none focus:ring-1 focus:ring-brand-700"
