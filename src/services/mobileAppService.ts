@@ -2,11 +2,13 @@ import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { supabase } from '../lib/supabase';
+import { notificationService } from './notificationService';
 
 /**
  * Initializes mobile native integrations (Capacitor runtime):
  * 1. Configures Android status bar color and style.
- * 2. Listens for deep links (e.g. Supabase magic link / OAuth callbacks).
+ * 2. Initializes persistent notification channels and schedules offline alarms.
+ * 3. Listens for deep links (e.g. Supabase magic link / OAuth callbacks).
  */
 export function initializeMobileApp() {
   if (!Capacitor.isNativePlatform()) {
@@ -20,6 +22,17 @@ export function initializeMobileApp() {
     StatusBar.setBackgroundColor({ color: '#ffffff' }).catch(() => {});
   } catch (err) {
     console.warn('StatusBar initialization error:', err);
+  }
+
+  // 2. Initialize notification system and schedule offline fee alarms in Android AlarmManager
+  try {
+    notificationService.initNotificationSystem().then(() => {
+      notificationService.scheduleAllUpcomingFeeAlerts();
+    }).catch(err => {
+      console.warn('Notification init error:', err);
+    });
+  } catch (err) {
+    console.warn('Notification system error:', err);
   }
 
   // 2. Custom URL scheme & Deep Link handling

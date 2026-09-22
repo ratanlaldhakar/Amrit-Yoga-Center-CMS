@@ -42,6 +42,7 @@ import {
   subtractOneDay,
 } from '../lib/billingUtils';
 import { supabaseSyncService } from './supabaseSyncService';
+import { notificationService } from './notificationService';
 
 const STORAGE_KEYS = {
   BATCHES: 'ayc_batches_v1',
@@ -1894,6 +1895,10 @@ class StorageService {
     supabaseSyncService.syncPayment(payment);
     supabaseSyncService.syncReceipt(receipt);
 
+    // Cancel pending alarms for this student and update upcoming schedule
+    notificationService.cancelStudentFeeAlerts(student.id, student.studentId);
+    notificationService.scheduleAllUpcomingFeeAlerts();
+
     this.recalculateBatchCounts();
     this.recalculateOverdues();
     this.notifyDataChanged();
@@ -2599,6 +2604,7 @@ class StorageService {
           this.recalculateBatchCounts();
           this.recalculateOverdues();
           this.notifyDataChanged();
+          notificationService.scheduleAllUpcomingFeeAlerts();
         }
       }
     } catch (err) {
@@ -2682,6 +2688,7 @@ class StorageService {
       this.recalculateBatchCounts();
       this.recalculateOverdues();
       this.notifyDataChanged();
+      notificationService.scheduleAllUpcomingFeeAlerts();
       return { success: true };
     }
     return { success: false, error: res.error };
