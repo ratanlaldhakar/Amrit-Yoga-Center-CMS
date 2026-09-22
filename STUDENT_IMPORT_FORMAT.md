@@ -87,7 +87,7 @@ Formatting Rules:
 2. If phone has +91 or leading 0, clean it to exactly 10 digits (e.g., 9829012345).
 3. Dates should be in YYYY-MM-DD format (e.g., 2026-09-15). If date is not provided, use today's date.
 4. "Fee Plan" defaults to "Monthly Regular" if unspecified.
-5. "Monthly Fee" defaults to 1800 if unspecified.
+5. "Monthly Fee" defaults to 2000 if unspecified.
 6. "Gender" should be "Male" or "Female".
 7. "Status" should be "Active".
 8. If WhatsApp number is not specified, copy the Mobile Number.

@@ -556,6 +556,11 @@ class SupabaseSyncService {
 
   async syncBillingCycle(cycle: BillingCycle): Promise<void> {
     if (!isSupabaseConfigured || !supabase) return;
+    // HARD GUARD: Block obsolete August cycles from re-uploading
+    if (cycle.id.includes('1789659494172')) {
+      console.warn('Supabase syncBillingCycle blocked obsolete cycle:', cycle.id);
+      return;
+    }
     try {
       const row = billingCycleToSupabase(cycle);
       const { error } = await supabase.from('billing_cycles').upsert(row, { onConflict: 'id' });
@@ -565,11 +570,56 @@ class SupabaseSyncService {
     }
   }
 
-  async syncPayment(payment: Payment): Promise<void> {
+  async deleteBillingCycle(cycleId: string): Promise<void> {
     if (!isSupabaseConfigured || !supabase) return;
     try {
+      const { error } = await supabase.from('billing_cycles').delete().eq('id', cycleId);
+      if (error) console.warn('Supabase deleteBillingCycle warning:', error.message);
+    } catch (err) {
+      console.warn('Supabase deleteBillingCycle error:', err);
+    }
+  }
+
+  async deletePayment(paymentId: string): Promise<void> {
+    if (!isSupabaseConfigured || !supabase) return;
+    try {
+      const { error } = await supabase.from('payments').delete().eq('id', paymentId);
+      if (error) console.warn('Supabase deletePayment warning:', error.message);
+    } catch (err) {
+      console.warn('Supabase deletePayment error:', err);
+    }
+  }
+
+  async deleteReceipt(receiptId: string): Promise<void> {
+    if (!isSupabaseConfigured || !supabase) return;
+    try {
+      const { error } = await supabase.from('receipts').delete().eq('id', receiptId);
+      if (error) console.warn('Supabase deleteReceipt warning:', error.message);
+    } catch (err) {
+      console.warn('Supabase deleteReceipt error:', err);
+    }
+  }
+
+  async syncPayment(payment: Payment): Promise<void> {
+    if (!isSupabaseConfigured || !supabase) return;
+    // HARD GUARD: Block synthetic / rogue / unapproved payments from reaching Supabase
+    if (
+      payment.id.startsWith('pay-rec-') ||
+      payment.id.startsWith('pay-bc-') ||
+      payment.receiptNo?.startsWith('AYC-REC-')
+    ) {
+      console.warn('Supabase syncPayment blocked rogue/synthetic payment:', payment.id, payment.receiptNo);
+      return;
+    }
+    try {
       const row = paymentToSupabase(payment);
-      const { error } = await supabase.from('payments').upsert(row, { onConflict: 'id' });
+      let { error } = await supabase.from('payments').upsert(row, { onConflict: 'id' });
+      if (error && error.message && (error.message.includes('payments_receipt_no_key') || error.message.includes('unique constraint'))) {
+        const uniqueRec = `${row.receipt_no || 'REC'}-${Date.now().toString().slice(-4)}`;
+        row.receipt_no = uniqueRec;
+        const retryRes = await supabase.from('payments').upsert(row, { onConflict: 'id' });
+        error = retryRes.error;
+      }
       if (error) console.warn('Supabase syncPayment warning:', error.message);
     } catch (err) {
       console.warn('Supabase syncPayment error:', err);
@@ -578,9 +628,24 @@ class SupabaseSyncService {
 
   async syncReceipt(receipt: Receipt): Promise<void> {
     if (!isSupabaseConfigured || !supabase) return;
+    // HARD GUARD: Block synthetic / rogue receipts from reaching Supabase
+    if (
+      receipt.id.startsWith('rec-bc-') ||
+      receipt.id.includes('17901020794') ||
+      receipt.receiptNo?.startsWith('AYC-REC-')
+    ) {
+      console.warn('Supabase syncReceipt blocked rogue/synthetic receipt:', receipt.id, receipt.receiptNo);
+      return;
+    }
     try {
       const row = receiptToSupabase(receipt);
-      const { error } = await supabase.from('receipts').upsert(row, { onConflict: 'id' });
+      let { error } = await supabase.from('receipts').upsert(row, { onConflict: 'id' });
+      if (error && error.message && (error.message.includes('receipts_receipt_no_key') || error.message.includes('unique constraint'))) {
+        const uniqueRec = `${row.receipt_no || 'REC'}-${Date.now().toString().slice(-4)}`;
+        row.receipt_no = uniqueRec;
+        const retryRes = await supabase.from('receipts').upsert(row, { onConflict: 'id' });
+        error = retryRes.error;
+      }
       if (error) console.warn('Supabase syncReceipt warning:', error.message);
     } catch (err) {
       console.warn('Supabase syncReceipt error:', err);
@@ -842,23 +907,30 @@ class SupabaseSyncService {
         if (error) throw new Error(`Failed to upload students: ${error.message}`);
       }
 
-      // 4. Billing cycles
-      if (data.billingCycles.length > 0) {
-        const cycleRows = data.billingCycles.map(billingCycleToSupabase);
+      // 4. Billing cycles (exclude obsolete August cycles)
+      const validCycles = data.billingCycles.filter(c => !c.id.includes('1789659494172'));
+      if (validCycles.length > 0) {
+        const cycleRows = validCycles.map(billingCycleToSupabase);
         const { error } = await supabase.from('billing_cycles').upsert(cycleRows, { onConflict: 'id' });
         if (error) throw new Error(`Failed to upload billing cycles: ${error.message}`);
       }
 
-      // 5. Payments
-      if (data.payments.length > 0) {
-        const paymentRows = data.payments.map(paymentToSupabase);
+      // 5. Payments (exclude rogue/synthetic payments)
+      const validPayments = data.payments.filter(
+        p => !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo?.startsWith('AYC-REC-')
+      );
+      if (validPayments.length > 0) {
+        const paymentRows = validPayments.map(paymentToSupabase);
         const { error } = await supabase.from('payments').upsert(paymentRows, { onConflict: 'id' });
         if (error) throw new Error(`Failed to upload payments: ${error.message}`);
       }
 
-      // 6. Receipts
-      if (data.receipts.length > 0) {
-        const receiptRows = data.receipts.map(receiptToSupabase);
+      // 6. Receipts (exclude rogue/synthetic receipts)
+      const validReceipts = data.receipts.filter(
+        r => !r.id.startsWith('rec-bc-') && !r.id.includes('17901020794') && !r.receiptNo?.startsWith('AYC-REC-')
+      );
+      if (validReceipts.length > 0) {
+        const receiptRows = validReceipts.map(receiptToSupabase);
         const { error } = await supabase.from('receipts').upsert(receiptRows, { onConflict: 'id' });
         if (error) throw new Error(`Failed to upload receipts: ${error.message}`);
       }
@@ -1019,9 +1091,31 @@ class SupabaseSyncService {
         success: true,
         batches: batchesRes.data ? batchesRes.data.map(supabaseToBatch) : [],
         students: studentsRes.data ? studentsRes.data.map(supabaseToStudent) : [],
-        billingCycles: cyclesRes.data ? cyclesRes.data.map(supabaseToBillingCycle) : [],
-        payments: paymentsRes.data ? paymentsRes.data.map(supabaseToPayment) : [],
-        receipts: receiptsRes.data ? receiptsRes.data.map(supabaseToReceipt) : [],
+        billingCycles: cyclesRes.data
+          ? cyclesRes.data
+              .map(supabaseToBillingCycle)
+              .filter(c => !c.id.includes('1789659494172'))
+          : [],
+        payments: paymentsRes.data
+          ? paymentsRes.data
+              .map(supabaseToPayment)
+              .filter(
+                p =>
+                  !p.id.startsWith('pay-rec-') &&
+                  !p.id.startsWith('pay-bc-') &&
+                  !p.receiptNo?.startsWith('AYC-REC-')
+              )
+          : [],
+        receipts: receiptsRes.data
+          ? receiptsRes.data
+              .map(supabaseToReceipt)
+              .filter(
+                r =>
+                  !r.id.startsWith('rec-bc-') &&
+                  !r.id.includes('17901020794') &&
+                  !r.receiptNo?.startsWith('AYC-REC-')
+              )
+          : [],
         expenses: expensesRes.data ? expensesRes.data.map(supabaseToExpense) : [],
         enquiries: enquiriesRes.data ? enquiriesRes.data.map(supabaseToEnquiry) : [],
         trials: trialsRes.data ? trialsRes.data.map(supabaseToTrial) : [],

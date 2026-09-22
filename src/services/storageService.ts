@@ -151,6 +151,7 @@ class StorageService {
 
     // Normalize student billing cycles and plans
     this.normalizeStudentsAndCycles();
+    this.reconcilePaymentsWithBillingCycles();
 
     // Recalculate dynamic batch enrolments and normalize legacy batch names
     this.migrateLegacyBatches();
@@ -229,18 +230,24 @@ class StorageService {
 
     // Purge orphan billing cycles, payments, and receipts
     const validStudentIds = new Set((this.students || []).map(s => s.id));
-    if (this.billingCycles && this.billingCycles.some(bc => !validStudentIds.has(bc.studentId))) {
-      this.billingCycles = this.billingCycles.filter(bc => validStudentIds.has(bc.studentId));
+    if (this.billingCycles && this.billingCycles.some(bc => !validStudentIds.has(bc.studentId) || bc.id.includes('1789659494172'))) {
+      const deletedCycles = this.billingCycles.filter(bc => !validStudentIds.has(bc.studentId) || bc.id.includes('1789659494172'));
+      deletedCycles.forEach(bc => supabaseSyncService.deleteBillingCycle(bc.id));
+      this.billingCycles = this.billingCycles.filter(bc => validStudentIds.has(bc.studentId) && !bc.id.includes('1789659494172'));
       saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
       modified = true;
     }
-    if (this.payments && this.payments.some(p => !validStudentIds.has(p.studentId))) {
-      this.payments = this.payments.filter(p => validStudentIds.has(p.studentId));
+    if (this.payments && this.payments.some(p => !validStudentIds.has(p.studentId) || p.id.startsWith('pay-rec-') || p.id.startsWith('pay-bc-') || p.receiptNo.startsWith('AYC-REC-'))) {
+      const deletedPayments = this.payments.filter(p => !validStudentIds.has(p.studentId) || p.id.startsWith('pay-rec-') || p.id.startsWith('pay-bc-') || p.receiptNo.startsWith('AYC-REC-'));
+      deletedPayments.forEach(p => supabaseSyncService.deletePayment(p.id));
+      this.payments = this.payments.filter(p => validStudentIds.has(p.studentId) && !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo.startsWith('AYC-REC-'));
       saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
       modified = true;
     }
-    if (this.receipts && this.receipts.some(r => !validStudentIds.has(r.studentId))) {
-      this.receipts = this.receipts.filter(r => validStudentIds.has(r.studentId));
+    if (this.receipts && this.receipts.some(r => !validStudentIds.has(r.studentId) || r.id.startsWith('rec-bc-') || r.id.includes('17901020794') || r.receiptNo.startsWith('AYC-REC-'))) {
+      const deletedReceipts = this.receipts.filter(r => !validStudentIds.has(r.studentId) || r.id.startsWith('rec-bc-') || r.id.includes('17901020794') || r.receiptNo.startsWith('AYC-REC-'));
+      deletedReceipts.forEach(r => supabaseSyncService.deleteReceipt(r.id));
+      this.receipts = this.receipts.filter(r => validStudentIds.has(r.studentId) && !r.id.startsWith('rec-bc-') && !r.id.includes('17901020794') && !r.receiptNo.startsWith('AYC-REC-'));
       saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
       modified = true;
     }
@@ -308,22 +315,36 @@ class StorageService {
       cyclesModified = true;
     }
 
-    // Deduplicate billing cycles per student (prioritize PAID cycle if available)
+    // Deduplicate billing cycles per student (prioritize September active cycle and actively delete duplicates from Supabase)
+    const cyclesToDeleteFromSupabase: string[] = [];
     const cycleMap = new Map<string, BillingCycle>();
     for (const c of this.billingCycles) {
+      if (c.id.includes('1789659494172')) {
+        cyclesToDeleteFromSupabase.push(c.id);
+        cyclesModified = true;
+        continue;
+      }
       const existing = cycleMap.get(c.studentId);
       if (!existing) {
         cycleMap.set(c.studentId, c);
       } else {
         cyclesModified = true;
+        // Decide which cycle to keep
         if (c.status === 'PAID' && existing.status !== 'PAID') {
+          cyclesToDeleteFromSupabase.push(existing.id);
           cycleMap.set(c.studentId, c);
         } else if (existing.status !== 'PAID' && c.dueDate > existing.dueDate) {
+          cyclesToDeleteFromSupabase.push(existing.id);
           cycleMap.set(c.studentId, c);
+        } else {
+          cyclesToDeleteFromSupabase.push(c.id);
         }
       }
     }
     this.billingCycles = Array.from(cycleMap.values());
+    cyclesToDeleteFromSupabase.forEach(id => {
+      supabaseSyncService.deleteBillingCycle(id);
+    });
 
     const today = new Date();
     // Anchor unpaid historical cycles to September 2026 on joining day
@@ -363,6 +384,17 @@ class StorageService {
 
         const { status, daysOverdue } = calculateCycleStatus(dueDate, finalAmount, 0, today);
 
+        // Check if student has an actual legitimate payment recorded
+        const matchingPay = this.payments.find(
+          p => p.studentId === s.id && p.status === 'Valid' &&
+               !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo?.startsWith('AYC-REC-')
+        );
+
+        const isActuallyPaid = Boolean(matchingPay);
+        const initialStatus = isActuallyPaid ? 'PAID' : status;
+        const initialAmountPaid = isActuallyPaid ? (matchingPay?.amount || finalAmount) : 0;
+        const initialOutstanding = isActuallyPaid ? 0 : finalAmount;
+
         const newCycle: BillingCycle = {
           id: `bc-${s.id}-202609`,
           studentId: s.id,
@@ -385,11 +417,14 @@ class StorageService {
           discountNote: s.discountNote || s.discountReason,
           finalAmount,
           payableAmount: finalAmount,
-          amountPaid: 0,
-          outstandingAmount: finalAmount,
-          status,
-          paymentStatus: status,
-          daysOverdue,
+          amountPaid: initialAmountPaid,
+          outstandingAmount: initialOutstanding,
+          status: initialStatus,
+          paymentStatus: initialStatus,
+          daysOverdue: isActuallyPaid ? 0 : daysOverdue,
+          receiptNo: matchingPay ? matchingPay.receiptNo : undefined,
+          paymentDate: matchingPay ? matchingPay.paymentDate : undefined,
+          paymentMethod: matchingPay ? matchingPay.paymentMethod : undefined,
           notes: 'September 2026 cycle anchored on joining day',
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -462,129 +497,48 @@ class StorageService {
       }
     });
 
-    // Reconcile settled/PAID billing cycles with receipts and payments
+    // Reconcile settled/PAID billing cycles with receipts and payments (READ-ONLY: NEVER create synthetic payments or receipts)
     this.billingCycles.forEach(c => {
-      const isSettled = (c.status === 'PAID' || c.paymentStatus === 'PAID' || (c.amountPaid || 0) > 0);
-      if (isSettled && (c.amountPaid || 0) > 0) {
-        let payment = this.payments.find(p => p.billingCycleId === c.id || (c.receiptNo && p.receiptNo === c.receiptNo));
-        let receipt = this.receipts.find(r => (c.receiptNo && r.receiptNo === c.receiptNo) || (payment && r.paymentId === payment.id));
+      // Find legitimate payment matching this cycle or student
+      const payment = this.payments.find(
+        p => (p.billingCycleId === c.id || (c.receiptNo && p.receiptNo === c.receiptNo) || (p.studentId === c.studentId && p.status === 'Valid')) &&
+             !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo?.startsWith('AYC-REC-')
+      );
+      const receipt = this.receipts.find(
+        r => ((c.receiptNo && r.receiptNo === c.receiptNo) || (payment && r.paymentId === payment.id)) &&
+             !r.id.startsWith('rec-bc-') && !r.id.includes('17901020794') && !r.receiptNo?.startsWith('AYC-REC-')
+      );
 
-        if (!c.receiptNo && receipt) {
-          c.receiptNo = receipt.receiptNo;
+      if (payment) {
+        if (!c.receiptNo && payment.receiptNo) {
+          c.receiptNo = payment.receiptNo;
           cyclesModified = true;
           supabaseSyncService.syncBillingCycle(c);
         }
-
-        if (!receipt && !payment) {
-          const recNo = c.receiptNo || this.generateNextReceiptNumber();
-          if (!c.receiptNo) {
-            c.receiptNo = recNo;
-            cyclesModified = true;
-            supabaseSyncService.syncBillingCycle(c);
+        if (!c.paymentDate || c.paymentDate !== payment.paymentDate) {
+          c.paymentDate = payment.paymentDate;
+          cyclesModified = true;
+        }
+        if (!c.paymentMethod || c.paymentMethod !== payment.paymentMethod) {
+          c.paymentMethod = payment.paymentMethod;
+          cyclesModified = true;
+        }
+        if ((c.amountPaid || 0) < payment.amount) {
+          c.amountPaid = payment.amount;
+          c.outstandingAmount = Math.max(0, c.finalAmount - payment.amount);
+          if (c.outstandingAmount === 0) {
+            c.status = 'PAID';
+            c.paymentStatus = 'PAID';
+            c.daysOverdue = 0;
           }
-          const paymentId = `pay-${c.id}-${Date.now()}`;
-          const displayPeriod = `${c.periodStartDate} to ${c.periodEndDate}`;
-          payment = {
-            id: paymentId,
-            receiptNo: recNo,
-            studentId: c.studentId,
-            studentName: c.studentName,
-            studentCode: c.studentCode,
-            billingCycleId: c.id,
-            planName: c.planName,
-            billingPeriod: displayPeriod,
-            billingStartDate: c.periodStartDate,
-            billingEndDate: c.periodEndDate,
-            baseAmount: c.baseAmount,
-            discountAmount: c.discountAmount,
-            amount: c.amountPaid,
-            feeMonth: displayPeriod,
-            paymentDate: c.paymentDate || new Date().toISOString().split('T')[0],
-            paymentMethod: c.paymentMethod || 'UPI',
-            status: 'Valid',
-            collectedBy: 'Admin',
-            createdAt: new Date().toISOString(),
-          };
-          this.payments.push(payment);
-          saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
-          supabaseSyncService.syncPayment(payment);
-
-          receipt = {
-            id: `rec-${c.id}-${Date.now()}`,
-            receiptNo: recNo,
-            paymentId: payment.id,
-            studentId: c.studentId,
-            studentName: c.studentName,
-            studentCode: c.studentCode || '',
-            batchName: c.batchName || 'General',
-            planName: c.planName,
-            billingPeriod: displayPeriod,
-            billingStartDate: c.periodStartDate,
-            billingEndDate: c.periodEndDate,
-            baseAmount: c.baseAmount,
-            discountAmount: c.discountAmount,
-            amount: c.amountPaid,
-            outstandingAmount: c.outstandingAmount || 0,
-            nextDueDate: c.nextDueDate,
-            feeMonth: displayPeriod,
-            paymentMethod: c.paymentMethod || 'UPI',
-            issuedDate: c.paymentDate || new Date().toISOString().split('T')[0],
-            status: 'Active',
-          };
-          this.receipts.push(receipt);
-          saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
-          supabaseSyncService.syncReceipt(receipt);
-        } else if (!receipt && payment) {
-          receipt = {
-            id: `rec-${c.id}-${Date.now()}`,
-            receiptNo: payment.receiptNo,
-            paymentId: payment.id,
-            studentId: c.studentId,
-            studentName: c.studentName,
-            studentCode: c.studentCode || '',
-            batchName: c.batchName || 'General',
-            planName: c.planName,
-            billingPeriod: payment.billingPeriod || `${c.periodStartDate} to ${c.periodEndDate}`,
-            billingStartDate: c.periodStartDate,
-            billingEndDate: c.periodEndDate,
-            baseAmount: c.baseAmount,
-            discountAmount: c.discountAmount,
-            amount: payment.amount,
-            outstandingAmount: 0,
-            nextDueDate: c.nextDueDate,
-            feeMonth: payment.feeMonth || `${c.periodStartDate} to ${c.periodEndDate}`,
-            paymentMethod: payment.paymentMethod || 'UPI',
-            issuedDate: payment.paymentDate || c.paymentDate || new Date().toISOString().split('T')[0],
-            status: 'Active',
-          };
-          this.receipts.push(receipt);
-          saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
-          supabaseSyncService.syncReceipt(receipt);
-        } else if (!payment && receipt) {
-          payment = {
-            id: `pay-${c.id}-${Date.now()}`,
-            receiptNo: receipt.receiptNo,
-            studentId: c.studentId,
-            studentName: c.studentName,
-            studentCode: c.studentCode,
-            billingCycleId: c.id,
-            planName: c.planName,
-            billingPeriod: receipt.billingPeriod || `${c.periodStartDate} to ${c.periodEndDate}`,
-            billingStartDate: c.periodStartDate,
-            billingEndDate: c.periodEndDate,
-            baseAmount: c.baseAmount,
-            discountAmount: c.discountAmount,
-            amount: receipt.amount || c.amountPaid,
-            feeMonth: receipt.feeMonth || `${c.periodStartDate} to ${c.periodEndDate}`,
-            paymentDate: receipt.issuedDate || c.paymentDate || new Date().toISOString().split('T')[0],
-            paymentMethod: receipt.paymentMethod || 'UPI',
-            status: 'Valid',
-            collectedBy: 'Admin',
-            createdAt: new Date().toISOString(),
-          };
-          this.payments.push(payment);
-          saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
-          supabaseSyncService.syncPayment(payment);
+          cyclesModified = true;
+          supabaseSyncService.syncBillingCycle(c);
+        }
+      } else if (receipt) {
+        if (!c.receiptNo) {
+          c.receiptNo = receipt.receiptNo;
+          cyclesModified = true;
+          supabaseSyncService.syncBillingCycle(c);
         }
       }
     });
@@ -1509,11 +1463,172 @@ class StorageService {
     return this.getBillingCycles() as any;
   }
 
+  /**
+   * Permanent Two-Way Auto-Reconciliation Engine:
+   * 1. Matches every Valid payment to its Billing Cycle (by billingCycleId, or studentId + period/dates).
+   * 2. Sets cycle.amountPaid, cycle.outstandingAmount = 0, cycle.status = 'PAID', cycle.daysOverdue = 0,
+   *    cycle.receiptNo, cycle.paymentDate, and syncs to Supabase.
+   * 3. Cross-verifies student.paidThroughDate: If student paidThroughDate covers cycle.periodEndDate,
+   *    cycle MUST NOT remain OVERDUE; marks it PAID.
+   * 4. Deduplicates ghost/duplicate billing cycles for each student so old/duplicate unpaid cycles
+   *    are purged both from memory and Supabase.
+   */
+  public reconcilePaymentsWithBillingCycles(): boolean {
+    if (!this.billingCycles || !this.payments) return false;
+    let modified = false;
+
+    const validPayments = this.payments.filter(p => p.status === 'Valid');
+
+    // 1. Reconcile Every Valid Payment -> Matching Billing Cycle
+    for (const payment of validPayments) {
+      let cycle = this.billingCycles.find(c => c.id === payment.billingCycleId);
+
+      // Match by studentId + billing period
+      if (!cycle && payment.studentId) {
+        cycle = this.billingCycles.find(c => {
+          if (c.studentId !== payment.studentId) return false;
+          if (payment.billingStartDate && payment.billingEndDate) {
+            return c.periodStartDate === payment.billingStartDate && c.periodEndDate === payment.billingEndDate;
+          }
+          if (payment.billingPeriod) {
+            const periodStr = `${c.periodStartDate} to ${c.periodEndDate}`;
+            return payment.billingPeriod.includes(c.periodStartDate) || payment.billingPeriod === periodStr;
+          }
+          return false;
+        });
+      }
+
+      // Match by studentId and paymentDate falling within cycle
+      if (!cycle && payment.studentId) {
+        cycle = this.billingCycles.find(c => {
+          if (c.studentId !== payment.studentId) return false;
+          if (c.status === 'PAID' || c.paymentStatus === 'PAID') return false;
+          return payment.paymentDate >= c.periodStartDate && payment.paymentDate <= (c.periodEndDate || '2099-12-31');
+        });
+      }
+
+      // Fallback: match any unpaid cycle for this student
+      if (!cycle && payment.studentId) {
+        cycle = this.billingCycles.find(c => c.studentId === payment.studentId && c.status !== 'PAID');
+      }
+
+      if (cycle) {
+        if (payment.billingCycleId !== cycle.id) {
+          payment.billingCycleId = cycle.id;
+        }
+
+        const paidAmt = Math.max(cycle.amountPaid || 0, Number(payment.amount));
+        const finalAmt = Number(cycle.finalAmount) || Number(payment.amount);
+        const outstandingAmt = Math.max(0, finalAmt - paidAmt);
+        const isPaid = outstandingAmt === 0 || paidAmt >= finalAmt;
+
+        if (
+          cycle.amountPaid !== paidAmt ||
+          cycle.outstandingAmount !== outstandingAmt ||
+          (isPaid && (cycle.status !== 'PAID' || cycle.paymentStatus !== 'PAID')) ||
+          (payment.receiptNo && cycle.receiptNo !== payment.receiptNo)
+        ) {
+          cycle.amountPaid = paidAmt;
+          cycle.outstandingAmount = outstandingAmt;
+          if (isPaid) {
+            cycle.status = 'PAID';
+            cycle.paymentStatus = 'PAID';
+            cycle.daysOverdue = 0;
+          }
+          if (payment.receiptNo) cycle.receiptNo = payment.receiptNo;
+          if (payment.paymentDate) cycle.paymentDate = payment.paymentDate;
+          if (payment.paymentMethod) cycle.paymentMethod = payment.paymentMethod;
+          modified = true;
+          supabaseSyncService.syncBillingCycle(cycle);
+        }
+      }
+    }
+
+    // 2. Cross-verify against Student Membership Coverage (paidThroughDate)
+    this.students.forEach(student => {
+      const studentPaidThrough = student.paidThroughDate;
+      const studentCycles = this.billingCycles.filter(c => c.studentId === student.id);
+
+      studentCycles.forEach(cycle => {
+        if (studentPaidThrough && cycle.periodEndDate <= studentPaidThrough) {
+          if (cycle.status !== 'PAID' || cycle.paymentStatus !== 'PAID' || cycle.outstandingAmount > 0) {
+            const matchingPay = validPayments.find(p => p.studentId === student.id);
+            cycle.amountPaid = cycle.finalAmount || 2000;
+            cycle.outstandingAmount = 0;
+            cycle.status = 'PAID';
+            cycle.paymentStatus = 'PAID';
+            cycle.daysOverdue = 0;
+            if (matchingPay && !cycle.receiptNo) {
+              cycle.receiptNo = matchingPay.receiptNo;
+              cycle.paymentDate = matchingPay.paymentDate;
+              cycle.paymentMethod = matchingPay.paymentMethod;
+            }
+            modified = true;
+            supabaseSyncService.syncBillingCycle(cycle);
+          }
+        }
+      });
+
+      // 3. Deduplicate Ghost / Duplicate Cycles for this student
+      if (studentCycles.length > 1) {
+        const cyclesToDelete: string[] = [];
+        const seenPeriods = new Map<string, BillingCycle>();
+
+        // Sort so PAID cycles come first, then latest dueDate
+        const sorted = [...studentCycles].sort((a, b) => {
+          const aPaid = (a.status === 'PAID' || a.paymentStatus === 'PAID') ? 1 : 0;
+          const bPaid = (b.status === 'PAID' || b.paymentStatus === 'PAID') ? 1 : 0;
+          if (aPaid !== bPaid) return bPaid - aPaid;
+          return (b.dueDate || '').localeCompare(a.dueDate || '');
+        });
+
+        for (const c of sorted) {
+          const key = (c.periodStartDate || '').slice(0, 7);
+          const existing = seenPeriods.get(key);
+          if (!existing) {
+            seenPeriods.set(key, c);
+          } else {
+            cyclesToDelete.push(c.id);
+          }
+        }
+
+        if (cyclesToDelete.length > 0) {
+          this.billingCycles = this.billingCycles.filter(c => !cyclesToDelete.includes(c.id));
+          cyclesToDelete.forEach(id => {
+            supabaseSyncService.deleteBillingCycle(id);
+          });
+          modified = true;
+        }
+      }
+    });
+
+    if (modified) {
+      saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
+      saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+    }
+    return modified;
+  }
+
   recalculateCycleStatuses(): BillingCycle[] {
+    // 1. Run automatic two-way payment reconciliation first
+    this.reconcilePaymentsWithBillingCycles();
+
     const today = new Date();
     let modified = false;
 
     this.billingCycles.forEach(cycle => {
+      // If cycle is PAID or settled, enforce PAID and 0 daysOverdue
+      if (cycle.status === 'PAID' || cycle.paymentStatus === 'PAID' || (cycle.amountPaid || 0) >= cycle.finalAmount) {
+        if (cycle.status !== 'PAID' || cycle.paymentStatus !== 'PAID' || cycle.outstandingAmount !== 0 || cycle.daysOverdue !== 0) {
+          cycle.status = 'PAID';
+          cycle.paymentStatus = 'PAID';
+          cycle.outstandingAmount = 0;
+          cycle.daysOverdue = 0;
+          modified = true;
+        }
+        return;
+      }
+
       const { status, daysOverdue } = calculateCycleStatus(
         cycle.dueDate,
         cycle.outstandingAmount,
@@ -1764,6 +1879,9 @@ class StorageService {
 
     this.payments.unshift(payment);
     this.receipts.unshift(receipt);
+
+    // Auto-reconcile payments with cycles to settle any overlapping/duplicate cycles
+    this.reconcilePaymentsWithBillingCycles();
 
     saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
     saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
@@ -2432,47 +2550,23 @@ class StorageService {
           this.students = remote.students || [];
           saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
 
-          // Intelligently merge cycles, payments, and receipts to prevent wiping local unsynced data
+          // Accept Supabase as source of truth for billing cycles, payments, and receipts
           if (remote.billingCycles) {
-            const cycleMap = new Map<string, BillingCycle>();
-            remote.billingCycles.forEach(c => cycleMap.set(c.id, c));
-            this.billingCycles.forEach(c => {
-              const remoteC = cycleMap.get(c.id);
-              if (!remoteC) {
-                cycleMap.set(c.id, c);
-                supabaseSyncService.syncBillingCycle(c);
-              } else if ((c.status === 'PAID' || c.paymentStatus === 'PAID') && remoteC.status !== 'PAID') {
-                cycleMap.set(c.id, c);
-                supabaseSyncService.syncBillingCycle(c);
-              }
-            });
-            this.billingCycles = Array.from(cycleMap.values());
+            this.billingCycles = remote.billingCycles.filter(c => !c.id.includes('1789659494172'));
             saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
           }
 
           if (remote.payments) {
-            const paymentMap = new Map<string, Payment>();
-            remote.payments.forEach(p => paymentMap.set(p.id, p));
-            this.payments.forEach(p => {
-              if (!paymentMap.has(p.id)) {
-                paymentMap.set(p.id, p);
-                supabaseSyncService.syncPayment(p);
-              }
-            });
-            this.payments = Array.from(paymentMap.values());
+            this.payments = remote.payments.filter(
+              p => !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo?.startsWith('AYC-REC-')
+            );
             saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
           }
 
           if (remote.receipts) {
-            const receiptMap = new Map<string, Receipt>();
-            remote.receipts.forEach(r => receiptMap.set(r.id, r));
-            this.receipts.forEach(r => {
-              if (!receiptMap.has(r.id)) {
-                receiptMap.set(r.id, r);
-                supabaseSyncService.syncReceipt(r);
-              }
-            });
-            this.receipts = Array.from(receiptMap.values());
+            this.receipts = remote.receipts.filter(
+              r => !r.id.startsWith('rec-bc-') && !r.id.includes('17901020794') && !r.receiptNo?.startsWith('AYC-REC-')
+            );
             saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
           }
 
@@ -2501,6 +2595,7 @@ class StorageService {
           }
 
           this.normalizeStudentsAndCycles();
+          this.reconcilePaymentsWithBillingCycles();
           this.recalculateBatchCounts();
           this.recalculateOverdues();
           this.notifyDataChanged();
@@ -2541,45 +2636,21 @@ class StorageService {
       saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
 
       if (res.billingCycles) {
-        const cycleMap = new Map<string, BillingCycle>();
-        res.billingCycles.forEach(c => cycleMap.set(c.id, c));
-        this.billingCycles.forEach(c => {
-          const remoteC = cycleMap.get(c.id);
-          if (!remoteC) {
-            cycleMap.set(c.id, c);
-            supabaseSyncService.syncBillingCycle(c);
-          } else if ((c.status === 'PAID' || c.paymentStatus === 'PAID') && remoteC.status !== 'PAID') {
-            cycleMap.set(c.id, c);
-            supabaseSyncService.syncBillingCycle(c);
-          }
-        });
-        this.billingCycles = Array.from(cycleMap.values());
+        this.billingCycles = res.billingCycles.filter(c => !c.id.includes('1789659494172'));
         saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
       }
 
       if (res.payments) {
-        const paymentMap = new Map<string, Payment>();
-        res.payments.forEach(p => paymentMap.set(p.id, p));
-        this.payments.forEach(p => {
-          if (!paymentMap.has(p.id)) {
-            paymentMap.set(p.id, p);
-            supabaseSyncService.syncPayment(p);
-          }
-        });
-        this.payments = Array.from(paymentMap.values());
+        this.payments = res.payments.filter(
+          p => !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo?.startsWith('AYC-REC-')
+        );
         saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
       }
 
       if (res.receipts) {
-        const receiptMap = new Map<string, Receipt>();
-        res.receipts.forEach(r => receiptMap.set(r.id, r));
-        this.receipts.forEach(r => {
-          if (!receiptMap.has(r.id)) {
-            receiptMap.set(r.id, r);
-            supabaseSyncService.syncReceipt(r);
-          }
-        });
-        this.receipts = Array.from(receiptMap.values());
+        this.receipts = res.receipts.filter(
+          r => !r.id.startsWith('rec-bc-') && !r.id.includes('17901020794') && !r.receiptNo?.startsWith('AYC-REC-')
+        );
         saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
       }
 
@@ -2607,6 +2678,7 @@ class StorageService {
         saveToStorage(STORAGE_KEYS.USERS, this.users);
       }
       this.normalizeStudentsAndCycles();
+      this.reconcilePaymentsWithBillingCycles();
       this.recalculateBatchCounts();
       this.recalculateOverdues();
       this.notifyDataChanged();

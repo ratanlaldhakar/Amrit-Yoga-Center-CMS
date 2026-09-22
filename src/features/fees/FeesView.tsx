@@ -49,6 +49,16 @@ export const FeesView: React.FC<FeesViewProps> = ({
   >('all_pending');
   const [searchQuery, setSearchQuery] = useState('');
 
+  const getEffectiveCycleStatus = (cycle: BillingCycle, student?: Student) => {
+    if (cycle.status === 'PAID' || cycle.paymentStatus === 'PAID' || (cycle.amountPaid || 0) >= cycle.finalAmount) {
+      return 'PAID';
+    }
+    if (student && student.paidThroughDate && cycle.periodEndDate && cycle.periodEndDate <= student.paidThroughDate) {
+      return 'PAID';
+    }
+    return cycle.paymentStatus || cycle.status;
+  };
+
   // Counters for tabs
   const tabCounts = useMemo(() => {
     let overdue = 0;
@@ -58,7 +68,8 @@ export const FeesView: React.FC<FeesViewProps> = ({
     let allPending = 0;
 
     billingCycles.forEach(c => {
-      const status = c.paymentStatus || c.status;
+      const student = studentsMap.get(c.studentId);
+      const status = getEffectiveCycleStatus(c, student);
       if (status === 'OVERDUE') overdue++;
       if (status === 'DUE TODAY') dueToday++;
       if (status === 'UPCOMING') upcoming++;
@@ -67,7 +78,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
     });
 
     return { overdue, dueToday, upcoming, partial, allPending, total: billingCycles.length };
-  }, [billingCycles]);
+  }, [billingCycles, studentsMap]);
 
   // Tab Filtering & Search
   const filteredCycles = useMemo(() => {
@@ -91,7 +102,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
         if (!matchesSearch) return false;
 
-        const status = cycle.paymentStatus || cycle.status;
+        const status = getEffectiveCycleStatus(cycle, student);
         if (activeTab === 'all') return true;
         if (activeTab === 'all_pending') return status !== 'PAID';
         if (activeTab === 'overdue') return status === 'OVERDUE';

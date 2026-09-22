@@ -71,7 +71,7 @@ export const MobileNav: React.FC<MobileNavProps> = ({
           <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs transition-opacity" onClick={onClose} />
           
           <div className="fixed top-0 bottom-0 left-0 w-72 max-w-[85vw] bg-white z-50 flex flex-col shadow-2xl animate-in slide-in-from-left duration-200">
-            <div className="p-4 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+            <div className="p-4 pt-[calc(1rem+env(safe-area-inset-top,0px))] border-b border-slate-200 flex items-center justify-between bg-slate-50">
               <div className="flex items-center gap-2.5">
                 <img
                   src="/logo.png"
@@ -304,7 +304,7 @@ export const MobileNav: React.FC<MobileNavProps> = ({
       )}
 
       {/* 3. Persistent Mobile Bottom Bar */}
-      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-md border-t border-slate-200 z-40 flex items-center justify-around py-1.5 px-3 shadow-lg">
+      <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white/95 backdrop-blur-md border-t border-slate-200 z-40 flex items-center justify-around py-1.5 px-3 pb-[calc(0.375rem+env(safe-area-inset-bottom,0px))] shadow-lg">
         {/* Tab 1: Home / Dashboard */}
         <button
           onClick={() => onSelectTab('dashboard')}

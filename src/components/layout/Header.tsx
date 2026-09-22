@@ -1,11 +1,13 @@
 import React from 'react';
-import { Search, CreditCard, UserPlus, Menu } from 'lucide-react';
+import { Search, CreditCard, UserPlus, Menu, RefreshCw } from 'lucide-react';
 
 interface HeaderProps {
   onOpenSearch: () => void;
   onOpenCollectFee: () => void;
   onOpenAddStudent: () => void;
   onToggleMobileNav: () => void;
+  onRefresh?: () => void;
+  isSyncing?: boolean;
   title: string;
 }
 
@@ -14,10 +16,12 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenCollectFee,
   onOpenAddStudent,
   onToggleMobileNav,
+  onRefresh,
+  isSyncing = false,
   title,
 }) => {
   return (
-    <header className="h-14 sm:h-16 bg-white border-b border-slate-200 px-3 sm:px-6 lg:px-8 flex items-center justify-between gap-2 sm:gap-4 sticky top-0 z-30">
+    <header className="min-h-14 sm:min-h-16 pt-[env(safe-area-inset-top,0px)] bg-white border-b border-slate-200 px-3 sm:px-6 lg:px-8 flex items-center justify-between gap-2 sm:gap-4 sticky top-0 z-30 shrink-0">
       {/* Left: Mobile Menu Toggle & Title */}
       <div className="flex items-center gap-2 sm:gap-3 min-w-0">
         <button
@@ -58,6 +62,23 @@ export const Header: React.FC<HeaderProps> = ({
 
       {/* Right: Quick Operational Actions */}
       <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+        {/* Refresh / Sync Button (Mobile & Desktop) */}
+        {onRefresh && (
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={isSyncing}
+            className="p-1.5 sm:px-2.5 sm:py-1.5 rounded-md text-slate-600 hover:text-brand-700 hover:bg-brand-50 border border-transparent sm:border-slate-200 active:scale-95 transition-all shrink-0 flex items-center gap-1.5 disabled:opacity-50"
+            title="Refresh and sync data with cloud database"
+            aria-label="Sync with cloud"
+          >
+            <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin text-brand-600' : 'text-slate-600'}`} />
+            <span className="hidden sm:inline text-xs font-semibold text-slate-700">
+              {isSyncing ? 'Syncing...' : 'Sync Cloud'}
+            </span>
+          </button>
+        )}
+
         {/* Mobile Search Button */}
         <button
           type="button"
