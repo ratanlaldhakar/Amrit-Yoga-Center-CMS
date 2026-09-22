@@ -35,9 +35,9 @@ export function initializeMobileApp() {
     console.warn('Notification system error:', err);
   }
 
-  // 2. Custom URL scheme & Deep Link handling
+  // 3. Custom URL scheme & Deep Link handling
   // Handles: amrityoga://auth/callback#access_token=...&refresh_token=...
-  CapApp.addListener('appUrlOpen', async (data) => {
+  CapApp.addListener('appUrlOpen', async (data: any) => {
     try {
       const incomingUrl = data.url;
       if (!incomingUrl) return;
