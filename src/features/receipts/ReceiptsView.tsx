@@ -95,9 +95,9 @@ export const ReceiptsView: React.FC<ReceiptsViewProps> = ({ onViewReceipt, onEdi
       setLoadingRowId(`share-${receipt.id}`);
       const result = await shareInvoicePDF(receipt, settings);
       if (result.shared) {
-        showToast('Invoice PDF shared successfully');
+        showToast('Invoice PDF shared successfully', 'success');
       } else if (result.fallbackDownloaded) {
-        showToast('Web Share not supported; invoice downloaded to device');
+        showToast('Invoice PDF downloaded to device', 'info');
       }
     } catch (err: any) {
       console.error('Share error:', err);

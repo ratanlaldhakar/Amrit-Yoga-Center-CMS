@@ -4,37 +4,67 @@ import { storageService } from './storageService';
 import { formatINR } from '../lib/formatters';
 
 const CHANNEL_ID = 'ayc_fee_alerts';
+const NOTIF_EVENT_LEDGER_KEY = 'ayc_sent_notification_events_v2';
 const LAST_SCHEDULE_SYNC_KEY = 'ayc_last_fee_schedule_sync';
 
 /**
- * Generates a deterministic positive 32-bit integer seed for each student
+ * Generates a deterministic positive 32-bit integer ID for each student and event type
  * to guarantee non-colliding, repeatable Android AlarmManager notification IDs.
  */
-function getNumericStudentSeed(studentId: string, studentCode?: string): number {
-  if (studentCode) {
-    const digits = studentCode.replace(/\D/g, '');
-    if (digits) {
-      return Math.abs(parseInt(digits, 10)) % 100000;
-    }
-  }
+function getEventNotificationId(studentId: string, eventType: 'due' | 'overdue7', cycleDateStr?: string): number {
+  const seedStr = `${studentId}_${eventType}_${cycleDateStr || ''}`;
   let hash = 0;
-  for (let i = 0; i < studentId.length; i++) {
-    hash = (hash << 5) - hash + studentId.charCodeAt(i);
+  for (let i = 0; i < seedStr.length; i++) {
+    hash = (hash << 5) - hash + seedStr.charCodeAt(i);
     hash |= 0;
   }
-  return Math.abs(hash) % 100000;
+  return Math.abs(hash) % 10000000;
 }
 
 export function getDueAlertId(studentId: string, studentCode?: string): number {
-  return getNumericStudentSeed(studentId, studentCode) * 10 + 1;
+  return getEventNotificationId(studentId, 'due', studentCode);
 }
 
 export function getOverdue7AlertId(studentId: string, studentCode?: string): number {
-  return getNumericStudentSeed(studentId, studentCode) * 10 + 7;
+  return getEventNotificationId(studentId, 'overdue7', studentCode);
 }
 
 export class NotificationService {
   private channelCreated = false;
+  private isScheduling = false;
+  private lastScheduleRun = 0;
+
+  /**
+   * Checks if an event (e.g. specific cycle due or 7-day overdue) has already been notified.
+   * This completely prevents duplicate notifications from firing on repeated app opens.
+   */
+  private hasEventBeenSent(eventKey: string): boolean {
+    try {
+      const raw = localStorage.getItem(NOTIF_EVENT_LEDGER_KEY);
+      if (!raw) return false;
+      const ledger = JSON.parse(raw);
+      return Boolean(ledger[eventKey]);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Records that an alert event has been delivered/scheduled so it never fires again.
+   */
+  private markEventSent(eventKey: string, extraData?: any): void {
+    try {
+      const raw = localStorage.getItem(NOTIF_EVENT_LEDGER_KEY);
+      const ledger = raw ? JSON.parse(raw) : {};
+      ledger[eventKey] = {
+        sentAt: new Date().toISOString(),
+        ...extraData,
+      };
+      localStorage.setItem(NOTIF_EVENT_LEDGER_KEY, JSON.stringify(ledger));
+    } catch (err) {
+      console.warn('Error recording notification event in ledger:', err);
+    }
+  }
 
   /**
    * Initializes notification channels and requests permissions on Android.
@@ -65,6 +95,13 @@ export class NotificationService {
             lightColor: '#27384D', // AYC Deep Indigo brand color
           });
           this.channelCreated = true;
+
+          // Listen for notifications received (whether foreground or background) to update ledger
+          LocalNotifications.addListener('localNotificationReceived', (notification) => {
+            if (notification.extra?.eventKey) {
+              this.markEventSent(notification.extra.eventKey, notification.extra);
+            }
+          }).catch(() => {});
         }
         return true;
       } else if (typeof window !== 'undefined' && 'Notification' in window) {
@@ -84,10 +121,26 @@ export class NotificationService {
    * Schedules automated fee-due and 7-day overdue alarms in Android's AlarmManager.
    * Because alarms are scheduled at exact future timestamps with AlarmManager,
    * Android OS wakes up and fires them even when the app is completely closed.
+   *
+   * Features strict deduplication:
+   * - Each due and 7-day overdue event fires EXACTLY ONCE per billing cycle.
+   * - Opening the app multiple times will NEVER re-trigger already sent notifications.
    */
   async scheduleAllUpcomingFeeAlerts(): Promise<void> {
+    const nowMs = Date.now();
+    // Debounce to prevent multiple redundant runs within 3 seconds
+    if (this.isScheduling || nowMs - this.lastScheduleRun < 3000) {
+      return;
+    }
+    this.isScheduling = true;
+    this.lastScheduleRun = nowMs;
+
     try {
-      await this.initNotificationSystem();
+      const isReady = await this.initNotificationSystem();
+      if (!isReady && Capacitor.isNativePlatform()) {
+        this.isScheduling = false;
+        return;
+      }
 
       const students = storageService.getStudents();
       const activeStudents = students.filter(s => s.status === 'Active');
@@ -108,69 +161,91 @@ export class NotificationService {
                        cycle.paymentStatus === 'PAID' || 
                        (cycle.outstandingAmount || 0) <= 0 ||
                        (student.paidThroughDate && student.paidThroughDate >= cycle.periodEndDate);
-        if (isPaid) continue;
+        
+        if (isPaid) {
+          // If paid, ensure any old pending alarms for this cycle are cancelled
+          this.cancelStudentFeeAlerts(student.id, student.studentId);
+          continue;
+        }
 
         const dueAmount = cycle.outstandingAmount || cycle.finalAmount || 2000;
         const formattedAmount = formatINR(dueAmount);
         const planName = cycle.planName || student.feePlan || 'Membership';
         const clientName = student.fullName || cycle.studentName;
 
-        // --- 1. Due Date Alert (Day 1 of Fee Due at 09:00 AM) ---
-        const dueAlertId = getDueAlertId(student.id, student.studentId);
-        if (cycle.dueDate) {
-          const [year, month, day] = cycle.dueDate.split('-').map(Number);
-          const dueDateAt9AM = new Date(year, month - 1, day, 9, 0, 0, 0);
+        if (!cycle.dueDate) continue;
 
-          // If the due date is in the future
+        const [year, month, day] = cycle.dueDate.split('-').map(Number);
+        const dueDateAt9AM = new Date(year, month - 1, day, 9, 0, 0, 0);
+        const overdue7DateAt9AM = new Date(year, month - 1, day + 7, 9, 0, 0, 0);
+
+        // --- 1. Due Date Alert (Day 1 of Fee Due at 09:00 AM) ---
+        const dueEventKey = `${student.id}_${cycle.id}_due_${cycle.dueDate}`;
+        const dueAlertId = getEventNotificationId(student.id, 'due', cycle.dueDate);
+
+        if (!this.hasEventBeenSent(dueEventKey)) {
           if (dueDateAt9AM.getTime() > now.getTime()) {
+            // Future Due Date: Schedule into Android AlarmManager to trigger automatically while closed
             notificationsToSchedule.push({
               id: dueAlertId,
               title: `📅 Fee Due Today: ${clientName}`,
               body: `${clientName}'s membership fee of ${formattedAmount} is due today for ${planName}. Tap to review details.`,
               channelId: CHANNEL_ID,
-              schedule: { at: dueDateAt9AM },
-              extra: { studentId: student.id, type: 'fee_due_day_1', amount: dueAmount },
+              smallIcon: 'ic_stat_notification',
+              largeIcon: 'ic_notification_large',
+              iconColor: '#27384D',
+              schedule: { at: dueDateAt9AM, allowWhileIdle: true },
+              extra: { studentId: student.id, cycleId: cycle.id, eventKey: dueEventKey, type: 'fee_due_day_1', amount: dueAmount },
             });
           } else if (cycle.dueDate === todayStr && now.getHours() >= 9) {
-            // If today is the due date and it's already past 9am, fire today's alert shortly
+            // Due date is today and it hasn't been notified yet: trigger once & mark in ledger
             notificationsToSchedule.push({
               id: dueAlertId,
               title: `📅 Fee Due Today: ${clientName}`,
               body: `${clientName}'s membership fee of ${formattedAmount} is due today for ${planName}. Tap to collect.`,
               channelId: CHANNEL_ID,
+              smallIcon: 'ic_stat_notification',
+              largeIcon: 'ic_notification_large',
+              iconColor: '#27384D',
               schedule: { at: new Date(Date.now() + 1500) },
-              extra: { studentId: student.id, type: 'fee_due_day_1', amount: dueAmount },
+              extra: { studentId: student.id, cycleId: cycle.id, eventKey: dueEventKey, type: 'fee_due_day_1', amount: dueAmount },
             });
+            this.markEventSent(dueEventKey, { studentId: student.id, clientName, amount: dueAmount });
           }
         }
 
         // --- 2. 7-Day Overdue Alert (Exactly 7 Days After Due Date at 09:00 AM) ---
-        const overdue7AlertId = getOverdue7AlertId(student.id, student.studentId);
-        if (cycle.dueDate) {
-          const [year, month, day] = cycle.dueDate.split('-').map(Number);
-          // Due date + 7 days
-          const overdue7Date = new Date(year, month - 1, day + 7, 9, 0, 0, 0);
+        const overdue7EventKey = `${student.id}_${cycle.id}_overdue7_${cycle.dueDate}`;
+        const overdue7AlertId = getEventNotificationId(student.id, 'overdue7', cycle.dueDate);
 
-          if (overdue7Date.getTime() > now.getTime()) {
-            // Future 7-day overdue trigger
+        if (!this.hasEventBeenSent(overdue7EventKey)) {
+          if (overdue7DateAt9AM.getTime() > now.getTime()) {
+            // Future 7-day overdue trigger: Scheduled in AlarmManager to wake device even if app is closed
             notificationsToSchedule.push({
               id: overdue7AlertId,
               title: `⚠️ 7-Day Overdue Notice: ${clientName}`,
               body: `${clientName}'s fee of ${formattedAmount} is now 7 days overdue for ${planName}. Please follow up for collection.`,
               channelId: CHANNEL_ID,
-              schedule: { at: overdue7Date },
-              extra: { studentId: student.id, type: 'fee_overdue_day_7', amount: dueAmount },
+              smallIcon: 'ic_stat_notification',
+              largeIcon: 'ic_notification_large',
+              iconColor: '#27384D',
+              schedule: { at: overdue7DateAt9AM, allowWhileIdle: true },
+              extra: { studentId: student.id, cycleId: cycle.id, eventKey: overdue7EventKey, type: 'fee_overdue_day_7', amount: dueAmount },
             });
           } else if ((cycle.daysOverdue || 0) >= 7) {
-            // Already 7+ days overdue right now
+            // Already 7+ days overdue and not yet notified: trigger once & record in ledger so it NEVER repeats
             notificationsToSchedule.push({
               id: overdue7AlertId,
               title: `⚠️ 7-Day Overdue Notice: ${clientName}`,
               body: `${clientName}'s fee of ${formattedAmount} is ${cycle.daysOverdue} days overdue (${planName}). Please follow up for collection.`,
               channelId: CHANNEL_ID,
-              schedule: { at: new Date(Date.now() + 2500) },
-              extra: { studentId: student.id, type: 'fee_overdue_day_7', amount: dueAmount },
+              smallIcon: 'ic_stat_notification',
+              largeIcon: 'ic_notification_large',
+              iconColor: '#27384D',
+              schedule: { at: new Date(Date.now() + 2000) },
+              extra: { studentId: student.id, cycleId: cycle.id, eventKey: overdue7EventKey, type: 'fee_overdue_day_7', amount: dueAmount },
             });
+            this.markEventSent(overdue7EventKey, { studentId: student.id, clientName, amount: dueAmount });
           }
         }
       }
@@ -186,6 +261,8 @@ export class NotificationService {
       localStorage.setItem(LAST_SCHEDULE_SYNC_KEY, now.toISOString());
     } catch (err) {
       console.warn('Error in scheduleAllUpcomingFeeAlerts:', err);
+    } finally {
+      this.isScheduling = false;
     }
   }
 
@@ -234,6 +311,9 @@ export class NotificationService {
         title: '📅 Fee Due Today: Sharma Ji',
         body: "Sharma Ji's membership fee of ₹2,000 is due today for Monthly Regular. Tap to review details.",
         channelId: CHANNEL_ID,
+        smallIcon: 'ic_stat_notification',
+        largeIcon: 'ic_notification_large',
+        iconColor: '#27384D',
         schedule: { at: new Date(now + 400) },
       },
       {
@@ -241,6 +321,9 @@ export class NotificationService {
         title: '⚠️ 7-Day Overdue Notice: Verma Ji',
         body: "Verma Ji's fee of ₹2,500 is now 7 days overdue for Advanced Yoga. Please follow up for collection.",
         channelId: CHANNEL_ID,
+        smallIcon: 'ic_stat_notification',
+        largeIcon: 'ic_notification_large',
+        iconColor: '#27384D',
         schedule: { at: new Date(now + 2000) },
       },
     ];
@@ -253,7 +336,7 @@ export class NotificationService {
       sampleNotifications.forEach(n => {
         new Notification(n.title, {
           body: n.body,
-          icon: '/favicon.png',
+          icon: '/logo.png',
         });
       });
     }

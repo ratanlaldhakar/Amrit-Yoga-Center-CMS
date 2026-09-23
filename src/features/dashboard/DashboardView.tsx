@@ -13,6 +13,7 @@ import {
   HelpCircle,
   CalendarCheck,
   Plus,
+  RefreshCw,
 } from 'lucide-react';
 import { storageService } from '../../services/storageService';
 import { formatINR, formatDate } from '../../lib/formatters';
@@ -28,6 +29,8 @@ interface DashboardViewProps {
   onOpenAddStudent: () => void;
   onOpenAddEnquiry: () => void;
   onOpenAddExpense: () => void;
+  onRefresh?: () => void;
+  isSyncing?: boolean;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -39,6 +42,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onOpenAddStudent,
   onOpenAddEnquiry,
   onOpenAddExpense,
+  onRefresh,
+  isSyncing = false,
 }) => {
   const metrics = storageService.getDashboardMetrics();
   const feeRecords = storageService.getFeeRecords();
@@ -69,6 +74,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
         {/* Quick Action Buttons (horizontally scrollable carousel on mobile, flex on desktop) */}
         <div className="flex items-center gap-2 overflow-x-auto whitespace-nowrap scrollbar-none pb-1 sm:flex-wrap w-full sm:w-auto">
+          {onRefresh && (
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={isSyncing}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 sm:py-1.5 text-xs font-semibold text-brand-800 bg-brand-50 hover:bg-brand-100 rounded-lg sm:rounded-md border border-brand-200 shadow-2xs transition-colors shrink-0 disabled:opacity-50"
+              title="Sync latest live records from Supabase cloud database"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-brand-700 ${isSyncing ? 'animate-spin' : ''}`} />
+              <span>{isSyncing ? 'Syncing...' : 'Sync Cloud'}</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={onOpenAddStudent}

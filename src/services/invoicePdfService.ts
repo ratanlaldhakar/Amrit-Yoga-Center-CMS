@@ -4,11 +4,27 @@
 
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
+import { Capacitor } from '@capacitor/core';
+import { Share } from '@capacitor/share';
+import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Receipt, CenterSettings, Student } from '../types';
 import { formatDate, numberToWordsINR, formatPeriodGraceful } from '../lib/formatters';
 import { resolveReceiptFinancials, resolveReceiptPlanName } from '../components/receipts/PrintableReceipt';
 import { AMRIT_LOGO_BASE64 } from '../assets/logoBase64';
 import { storageService } from './storageService';
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const result = reader.result as string;
+      const base64 = result.includes(',') ? result.split(',')[1] : result;
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
 
 
 /**
@@ -522,8 +538,36 @@ export async function shareInvoicePDF(
   try {
     const file = await createInvoiceFile(receipt, settings, element);
     const invoiceTitle = `${settings.centerName || 'Amrit Yoga Center'} Invoice - ${receipt.receiptNo}`;
+    const invoiceText = `Fee Receipt #${receipt.receiptNo} for ${receipt.studentName} (${formatCurrencyForPdf(receipt.amount)}) from ${settings.centerName || 'Amrit Yoga Center'}`;
 
-    // Verify Web Share API Level 2 support with file sharing
+    // Native Mobile App Share (Android APK via Capacitor Share & Filesystem)
+    if (Capacitor.isNativePlatform()) {
+      try {
+        const base64Data = await blobToBase64(file);
+        const savedFile = await Filesystem.writeFile({
+          path: file.name,
+          data: base64Data,
+          directory: Directory.Cache,
+        });
+
+        await Share.share({
+          title: invoiceTitle,
+          text: invoiceText,
+          url: savedFile.uri,
+          dialogTitle: `Share Receipt #${receipt.receiptNo}`,
+        });
+        return { shared: true, fallbackDownloaded: false };
+      } catch (nativeShareErr: any) {
+        // If user cancelled the native share picker, do not consider it a failure or download
+        const msg = String(nativeShareErr?.message || nativeShareErr || '').toLowerCase();
+        if (msg.includes('canceled') || msg.includes('cancelled') || msg.includes('abort')) {
+          return { shared: false, fallbackDownloaded: false };
+        }
+        console.warn('Native share failed, falling back to download:', nativeShareErr);
+      }
+    }
+
+    // Verify Web Share API Level 2 support with file sharing (Desktop / Mobile browsers)
     if (
       typeof navigator !== 'undefined' &&
       navigator.share &&
@@ -533,7 +577,7 @@ export async function shareInvoicePDF(
       await navigator.share({
         files: [file],
         title: invoiceTitle,
-        text: `Receipt ${receipt.receiptNo} for ${receipt.studentName} (${formatCurrencyForPdf(receipt.amount)}) from ${settings.centerName}`,
+        text: invoiceText,
       });
       return { shared: true, fallbackDownloaded: false };
     }

@@ -2048,18 +2048,70 @@ class StorageService {
         cycle.amountPaid = remainingPaid;
         cycle.outstandingAmount = Math.max(0, (cycle.finalAmount || cycle.baseAmount || 0) - remainingPaid);
         if (remainingPaid === 0) {
-          cycle.status = 'PENDING';
-          cycle.paymentStatus = 'PENDING';
+          const days = calculateOverdueDays(cycle.dueDate);
+          cycle.daysOverdue = days;
+          cycle.status = days > 0 ? 'OVERDUE' : (days === 0 ? 'DUE TODAY' : 'PENDING');
+          cycle.paymentStatus = cycle.status;
           cycle.paymentDate = undefined;
           cycle.paymentMethod = undefined;
+          cycle.receiptNo = undefined;
         } else {
           cycle.status = 'PARTIALLY PAID';
           cycle.paymentStatus = 'PARTIALLY PAID';
         }
         supabaseSyncService.syncBillingCycle(cycle);
+
+        // If an empty future cycle was generated when this was paid, remove that future cycle
+        if (remainingPaid === 0) {
+          const futureCycleIdx = this.billingCycles.findIndex(
+            c => c.studentId === cycle.studentId && 
+                 c.periodStartDate === cycle.periodEndDate && 
+                 (c.amountPaid || 0) === 0 &&
+                 c.id !== cycle.id
+          );
+          if (futureCycleIdx !== -1) {
+            const removedCycle = this.billingCycles.splice(futureCycleIdx, 1)[0];
+            supabaseSyncService.deleteBillingCycle(removedCycle.id).catch(() => {});
+          }
+        }
       }
     }
 
+    // Revert student billing status and paidThroughDate
+    const student = this.students.find(s => s.id === payment.studentId);
+    if (student) {
+      const remainingValidPayments = this.payments.filter(
+        p => p.studentId === student.id && p.id !== payment.id && p.status === 'Valid'
+      );
+      if (remainingValidPayments.length === 0) {
+        // Earliest unpaid cycle due date
+        const firstCycle = this.billingCycles
+          .filter(c => c.studentId === student.id)
+          .sort((a, b) => (a.dueDate || '').localeCompare(b.dueDate || ''))[0];
+        student.paidThroughDate = firstCycle?.periodStartDate || student.billingStartDate || student.joiningDate;
+        student.nextDueDate = firstCycle?.dueDate || student.billingStartDate || student.joiningDate;
+      } else {
+        // Find latest valid paid cycle
+        const paidCycles = this.billingCycles
+          .filter(c => c.studentId === student.id && c.status === 'PAID')
+          .sort((a, b) => (b.periodEndDate || '').localeCompare(a.periodEndDate || ''));
+        student.paidThroughDate = paidCycles[0]?.periodEndDate || student.billingStartDate;
+        student.nextDueDate = paidCycles[0] ? addMonthsClamped(paidCycles[0].dueDate, 1) : student.nextDueDate;
+      }
+
+      const todayStr = new Date().toISOString().split('T')[0];
+      if (student.nextDueDate && student.nextDueDate < todayStr) {
+        student.billingStatus = 'OVERDUE';
+      } else if (student.nextDueDate === todayStr) {
+        student.billingStatus = 'DUE TODAY';
+      } else {
+        student.billingStatus = student.paidThroughDate ? 'PAID' : 'PENDING';
+      }
+      student.updatedAt = new Date().toISOString();
+      supabaseSyncService.syncStudent(student);
+    }
+
+    saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
     saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
     saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
     saveToStorage(STORAGE_KEYS.FEE_RECORDS, this.feeRecords);

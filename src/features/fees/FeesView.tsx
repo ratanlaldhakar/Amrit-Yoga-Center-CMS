@@ -50,10 +50,14 @@ export const FeesView: React.FC<FeesViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
 
   const getEffectiveCycleStatus = (cycle: BillingCycle, student?: Student) => {
+    // If cycle has outstanding amount and is marked OVERDUE or DUE TODAY, never treat as PAID
+    if ((cycle.outstandingAmount || 0) > 0 && (cycle.status === 'OVERDUE' || cycle.status === 'DUE TODAY' || cycle.status === 'PARTIALLY PAID')) {
+      return cycle.status;
+    }
     if (cycle.status === 'PAID' || cycle.paymentStatus === 'PAID' || (cycle.amountPaid || 0) >= cycle.finalAmount) {
       return 'PAID';
     }
-    if (student && student.paidThroughDate && cycle.periodEndDate && cycle.periodEndDate <= student.paidThroughDate) {
+    if (student && student.paidThroughDate && cycle.periodEndDate && cycle.periodEndDate <= student.paidThroughDate && (cycle.amountPaid || 0) > 0) {
       return 'PAID';
     }
     return cycle.paymentStatus || cycle.status;

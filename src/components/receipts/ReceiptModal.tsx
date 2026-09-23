@@ -83,9 +83,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
       setIsSharing(true);
       const result = await shareInvoicePDF(receipt, settings, receiptRef.current);
       if (result.shared) {
-        showToast('Invoice PDF shared successfully');
+        showToast('Invoice PDF shared successfully', 'success');
       } else if (result.fallbackDownloaded) {
-        showToast('Web Share not supported; invoice downloaded to device');
+        showToast('Invoice PDF downloaded to device', 'info');
       }
     } catch (err: any) {
       console.error('Share error:', err);

@@ -15,11 +15,11 @@ export function initializeMobileApp() {
     return;
   }
 
-  // 1. Android Status Bar styling (Solid White bar with dark icons, never overlaying web content)
+  // 1. Android Status Bar styling for Launch & Splash: Deep Navy #27384D with white status icons
   try {
     StatusBar.setOverlaysWebView({ overlay: false }).catch(() => {});
-    StatusBar.setStyle({ style: Style.Light }).catch(() => {});
-    StatusBar.setBackgroundColor({ color: '#ffffff' }).catch(() => {});
+    StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
+    StatusBar.setBackgroundColor({ color: '#27384D' }).catch(() => {});
   } catch (err) {
     console.warn('StatusBar initialization error:', err);
   }
@@ -78,4 +78,18 @@ export function initializeMobileApp() {
       console.warn('Deep link handling error:', err);
     }
   });
+}
+
+/**
+ * Transitions the Android status bar to crisp ERP dashboard mode (Solid White bar with dark icons).
+ * Called once the splash animation completes and the dashboard is revealed.
+ */
+export function setDashboardStatusBar() {
+  if (!Capacitor.isNativePlatform()) return;
+  try {
+    StatusBar.setStyle({ style: Style.Light }).catch(() => {});
+    StatusBar.setBackgroundColor({ color: '#ffffff' }).catch(() => {});
+  } catch (err) {
+    console.warn('StatusBar transition error:', err);
+  }
 }

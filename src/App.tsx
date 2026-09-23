@@ -3,7 +3,7 @@ import { AuthProvider } from './context/AuthContext';
 import { ToastProvider } from './context/ToastContext';
 import { AdminLayout } from './components/layout/AdminLayout';
 import { SplashScreen } from './components/common/SplashScreen';
-import { initializeMobileApp } from './services/mobileAppService';
+import { initializeMobileApp, setDashboardStatusBar } from './services/mobileAppService';
 
 export function App() {
   const [showSplash, setShowSplash] = useState(true);
@@ -12,15 +12,22 @@ export function App() {
     initializeMobileApp();
   }, []);
 
+  const handleSplashComplete = () => {
+    setShowSplash(false);
+    setDashboardStatusBar();
+  };
+
   return (
     <AuthProvider>
       <ToastProvider>
-        {showSplash && <SplashScreen onComplete={() => setShowSplash(false)} />}
-        <AdminLayout />
+        {showSplash ? (
+          <SplashScreen onComplete={handleSplashComplete} />
+        ) : (
+          <AdminLayout />
+        )}
       </ToastProvider>
     </AuthProvider>
   );
 }
 
 export default App;
-

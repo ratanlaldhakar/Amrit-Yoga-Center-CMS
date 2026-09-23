@@ -1,7 +1,15 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+// Supabase client initialization with dual env-var fallback (Vite & Next.js compatibility)
+const supabaseUrl = 
+  import.meta.env.VITE_SUPABASE_URL || 
+  (import.meta.env as any).NEXT_PUBLIC_SUPABASE_URL || 
+  '';
+
+const supabaseAnonKey = 
+  import.meta.env.VITE_SUPABASE_ANON_KEY || 
+  (import.meta.env as any).NEXT_PUBLIC_SUPABASE_ANON_KEY || 
+  '';
 
 export const isSupabaseConfigured = Boolean(
   supabaseUrl && 
@@ -11,5 +19,12 @@ export const isSupabaseConfigured = Boolean(
 );
 
 export const supabase: SupabaseClient | null = isSupabaseConfigured
-  ? createClient(supabaseUrl, supabaseAnonKey)
+  ? createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+      },
+    })
   : null;
+

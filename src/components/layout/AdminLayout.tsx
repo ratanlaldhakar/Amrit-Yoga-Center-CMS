@@ -1,8 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
+import { LocalNotifications } from '@capacitor/local-notifications';
+import { RefreshCw } from 'lucide-react';
+import { useToast } from '../../context/ToastContext';
 import { Sidebar, NavigationTab } from './Sidebar';
 import { Header } from './Header';
 import { MobileNav } from './MobileNav';
 import { storageService } from '../../services/storageService';
+import { notificationService } from '../../services/notificationService';
 import { Student, Receipt, Enquiry, TrialClass } from '../../types';
 
 // Modals
@@ -49,26 +55,85 @@ const VALID_TABS: NavigationTab[] = [
 ];
 
 const getInitialTab = (): NavigationTab => {
+  // Always default directly to 'dashboard' (Home) on app startup
   try {
+    if (Capacitor.isNativePlatform()) {
+      return 'dashboard';
+    }
     const hash = window.location.hash.replace(/^#/, '') as NavigationTab;
-    if (VALID_TABS.includes(hash)) return hash;
-    const stored = localStorage.getItem('ayc_active_tab') as NavigationTab;
-    if (VALID_TABS.includes(stored)) return stored;
+    if (hash && VALID_TABS.includes(hash)) return hash;
   } catch {}
   return 'dashboard';
 };
 
 export const AdminLayout: React.FC = () => {
+  const { showToast } = useToast();
   const [currentTab, setCurrentTabState] = useState<NavigationTab>(getInitialTab);
   const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
   const [, setTick] = useState(0);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [pullDistance, setPullDistance] = useState(0);
+  const mainRef = useRef<HTMLElement | null>(null);
+  const touchStartY = useRef(0);
+  const isPulling = useRef(false);
 
   const setCurrentTab = (tab: NavigationTab) => {
     setCurrentTabState(tab);
     try {
       window.location.hash = tab;
-      localStorage.setItem('ayc_active_tab', tab);
     } catch {}
+  };
+
+  const handleManualSync = async (silent = false) => {
+    if (isSyncing) return;
+    setIsSyncing(true);
+    try {
+      const res = await storageService.pullFromSupabase();
+      if (res.success) {
+        if (!silent) {
+          showToast('Data refreshed successfully from cloud', 'success');
+        }
+        // Scan and trigger notifications for overdue fees
+        notificationService.checkAndNotifyDueFees();
+      } else if (!silent) {
+        showToast(res.error || 'Failed to sync with cloud', 'info');
+      }
+    } catch (err: any) {
+      if (!silent) {
+        showToast(err?.message || 'Sync error', 'error');
+      }
+    } finally {
+      setIsSyncing(false);
+      setTick(t => t + 1);
+    }
+  };
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (mainRef.current && mainRef.current.scrollTop <= 0) {
+      touchStartY.current = e.touches[0].clientY;
+      isPulling.current = true;
+    } else {
+      isPulling.current = false;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!isPulling.current) return;
+    const currentY = e.touches[0].clientY;
+    const diff = currentY - touchStartY.current;
+    if (diff > 0 && mainRef.current && mainRef.current.scrollTop <= 0) {
+      setPullDistance(Math.min(Math.floor(diff * 0.38), 75));
+    } else {
+      setPullDistance(0);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (pullDistance >= 50 && !isSyncing) {
+      handleManualSync(false);
+    }
+    setPullDistance(0);
+    isPulling.current = false;
   };
 
   useEffect(() => {
@@ -87,9 +152,50 @@ export const AdminLayout: React.FC = () => {
       setTick(t => t + 1);
     };
     window.addEventListener('amrit_data_updated', handleUpdate);
-    // Automatically trigger background Supabase cloud sync on mount
-    storageService.initCloudSync();
-    return () => window.removeEventListener('amrit_data_updated', handleUpdate);
+
+    // Initial sync from Supabase
+    handleManualSync(true);
+
+    // Request notification permission and check due fees on launch
+    notificationService.initNotificationSystem().then(() => {
+      notificationService.checkAndNotifyDueFees();
+    });
+
+    // When user taps a fee alert notification in Android notification bar, navigate to Fees tab
+    let notifSub: any = null;
+    if (Capacitor.isNativePlatform()) {
+      LocalNotifications.addListener('localNotificationActionPerformed', () => {
+        setCurrentTab('fees');
+      }).then(sub => {
+        notifSub = sub;
+      }).catch(() => {});
+    }
+
+    // Listen for app coming back to foreground (Capacitor mobile app)
+    const resumeListener = CapApp.addListener('appStateChange', state => {
+      if (state.isActive) {
+        handleManualSync(true);
+      }
+    });
+
+    // Listen for web window focus or tab visibility changes
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        handleManualSync(true);
+      }
+    };
+    window.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('focus', () => handleManualSync(true));
+
+    return () => {
+      window.removeEventListener('amrit_data_updated', handleUpdate);
+      if (notifSub && typeof notifSub.remove === 'function') {
+        notifSub.remove();
+      }
+      resumeListener.then(h => h.remove()).catch(() => {});
+      window.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('focus', () => handleManualSync(true));
+    };
   }, []);
 
   // Global modals
@@ -133,6 +239,71 @@ export const AdminLayout: React.FC = () => {
 
   const settings = storageService.getSettings();
   const metrics = storageService.getDashboardMetrics();
+
+  // Android Native Hardware Back-Button Handling
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+
+    let lastBackPressTime = 0;
+
+    const listenerPromise = CapApp.addListener('backButton', () => {
+      // 1. Close mobile drawer if open
+      if (isMobileNavOpen) {
+        setIsMobileNavOpen(false);
+        return;
+      }
+
+      // 2. Dismiss any active modal
+      if (isSearchOpen) { setIsSearchOpen(false); return; }
+      if (isCollectFeeOpen) { setIsCollectFeeOpen(false); return; }
+      if (isReceiptModalOpen) { setIsReceiptModalOpen(false); return; }
+      if (isEditReceiptOpen) { setIsEditReceiptOpen(false); return; }
+      if (isStudentFormOpen) { setIsStudentFormOpen(false); return; }
+      if (selectedStudentProfile || isStudentProfileOpen) {
+        setIsStudentProfileOpen(false);
+        setSelectedStudentProfile(null);
+        return;
+      }
+      if (isWhatsAppOpen) { setIsWhatsAppOpen(false); return; }
+      if (isExpenseFormOpen) { setIsExpenseFormOpen(false); return; }
+      if (isEnquiryFormOpen) { setIsEnquiryFormOpen(false); return; }
+      if (isTrialFormOpen) { setIsTrialFormOpen(false); return; }
+
+      // 3. If on a sub-view / sub-tab, go back to Dashboard
+      if (currentTab !== 'dashboard') {
+        setCurrentTab('dashboard');
+        return;
+      }
+
+      // 4. If already on Dashboard, require double back press to exit
+      const now = Date.now();
+      if (now - lastBackPressTime < 2000) {
+        CapApp.exitApp();
+      } else {
+        lastBackPressTime = now;
+        showToast('Press back again to exit Amrit Yoga Center', 'info');
+      }
+    });
+
+    return () => {
+      listenerPromise.then(h => h.remove()).catch(() => {});
+    };
+  }, [
+    isMobileNavOpen,
+    isSearchOpen,
+    isCollectFeeOpen,
+    isReceiptModalOpen,
+    isEditReceiptOpen,
+    isStudentFormOpen,
+    isStudentProfileOpen,
+    selectedStudentProfile,
+    isWhatsAppOpen,
+    isExpenseFormOpen,
+    isEnquiryFormOpen,
+    isTrialFormOpen,
+    currentTab,
+    showToast,
+  ]);
 
   // Handlers
   const handleOpenCollectFee = (studentId?: string, amount?: number) => {
@@ -262,10 +433,36 @@ export const AdminLayout: React.FC = () => {
           onOpenCollectFee={() => handleOpenCollectFee()}
           onOpenAddStudent={() => handleAddNewStudent()}
           onToggleMobileNav={() => setIsMobileNavOpen(true)}
+          onRefresh={() => handleManualSync(false)}
+          isSyncing={isSyncing}
         />
 
         {/* Scrollable Viewport - Fluid full-width ERP layout with mobile bottom-nav padding */}
-        <main className="flex-1 overflow-y-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 pb-24 md:pb-8">
+        <main
+          ref={mainRef}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          className="flex-1 overflow-y-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 pb-24 md:pb-8 relative"
+        >
+          {/* Pull to refresh visual feedback banner */}
+          {pullDistance > 0 && (
+            <div
+              style={{ height: `${pullDistance}px` }}
+              className="flex items-center justify-center overflow-hidden transition-all duration-75 text-brand-700 font-medium text-xs bg-brand-50/70 border border-brand-200/50 rounded-lg mb-2"
+            >
+              <RefreshCw className={`w-4 h-4 mr-2 ${pullDistance >= 50 ? 'animate-spin text-brand-700' : 'text-brand-500'}`} />
+              <span>{pullDistance >= 50 ? 'Release to refresh data' : 'Pull down to refresh'}</span>
+            </div>
+          )}
+
+          {isSyncing && pullDistance === 0 && (
+            <div className="flex items-center justify-center py-1.5 px-3 mb-3 bg-brand-50 border border-brand-200 rounded-md text-xs font-semibold text-brand-800 animate-pulse">
+              <RefreshCw className="w-3.5 h-3.5 mr-2 animate-spin text-brand-700" />
+              <span>Syncing live records with Supabase cloud database...</span>
+            </div>
+          )}
+
           <div className="w-full">
             {currentTab === 'dashboard' && (
               <DashboardView
@@ -277,6 +474,8 @@ export const AdminLayout: React.FC = () => {
                 onOpenAddStudent={() => handleAddNewStudent()}
                 onOpenAddEnquiry={() => setIsEnquiryFormOpen(true)}
                 onOpenAddExpense={() => setIsExpenseFormOpen(true)}
+                onRefresh={() => handleManualSync(false)}
+                isSyncing={isSyncing}
               />
             )}
 
