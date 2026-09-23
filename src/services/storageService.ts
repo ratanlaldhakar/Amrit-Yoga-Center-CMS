@@ -878,7 +878,25 @@ class StorageService {
     return newPlan;
   }
 
-  saveStudent(studentData: Partial<Student> & { fullName: string; mobileNumber: string; batchId?: string }): Student {
+  generateNextStudentId(): string {
+    const currentYear = new Date().getFullYear();
+    let maxSeq = 0;
+    for (const s of this.students) {
+      if (s.studentId) {
+        const match = s.studentId.match(/AYC-(\d{4})-(\d+)/i) || s.studentId.match(/(\d+)$/);
+        if (match) {
+          const num = parseInt(match[2] || match[1], 10);
+          if (!isNaN(num) && num > maxSeq) {
+            maxSeq = num;
+          }
+        }
+      }
+    }
+    const nextSeq = Math.max(maxSeq + 1, 1);
+    return `AYC-${currentYear}-${String(nextSeq).padStart(3, '0')}`;
+  }
+
+  async saveStudent(studentData: Partial<Student> & { fullName: string; mobileNumber: string; batchId?: string }): Promise<Student> {
     const batch = studentData.batchId ? this.getBatchById(studentData.batchId) : undefined;
     const batchName = batch ? batch.batchName : (studentData.batchName || 'Unassigned');
     const baseFee = Number(studentData.baseFee) || Number(studentData.monthlyFee) || (batch ? batch.monthlyFee : this.settings.defaultMonthlyFee);
@@ -904,7 +922,7 @@ class StorageService {
         this.students[index] = updated;
         this.recalculateBatchCounts();
         saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
-        supabaseSyncService.syncStudent(updated);
+        await supabaseSyncService.syncStudent(updated);
 
         // Update all related billing cycles for this student
         let cyclesUpdated = false;
@@ -988,9 +1006,7 @@ class StorageService {
     }
 
     // Generate new student ID
-    const nextSeq = this.students.length + 1;
-    const year = new Date().getFullYear();
-    const studentId = `AYC-${year}-${String(nextSeq).padStart(3, '0')}`;
+    const studentId = this.generateNextStudentId();
 
     const joinDate = studentData.joiningDate || new Date().toISOString().split('T')[0];
     const duration = studentData.planDurationMonths || 1;
@@ -1029,11 +1045,6 @@ class StorageService {
       updatedAt: new Date().toISOString(),
     };
 
-    this.students.unshift(newStudent);
-    this.recalculateBatchCounts();
-    saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
-    supabaseSyncService.syncStudent(newStudent);
-
     // Also create initial billing cycle for the new student
     const today = new Date();
     const dueDate = period.nextDueDate || period.periodStartDate;
@@ -1069,9 +1080,17 @@ class StorageService {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
+
+    // STRICT CLOUD SYNC: Save to Supabase Cloud FIRST
+    await supabaseSyncService.syncStudent(newStudent);
+    await supabaseSyncService.syncBillingCycle(newCycle);
+
+    this.students.unshift(newStudent);
+    this.recalculateBatchCounts();
+    saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
+
     this.billingCycles.unshift(newCycle);
     saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
-    supabaseSyncService.syncBillingCycle(newCycle);
 
     this.recalculateCycleStatuses();
     this.notifyDataChanged();
@@ -1084,6 +1103,18 @@ class StorageService {
     const createdCycles: BillingCycle[] = [];
     const year = new Date().getFullYear();
     const today = new Date();
+    let maxSeq = 0;
+    for (const s of this.students) {
+      if (s.studentId) {
+        const match = s.studentId.match(/AYC-(\d{4})-(\d+)/i) || s.studentId.match(/(\d+)$/);
+        if (match) {
+          const num = parseInt(match[2] || match[1], 10);
+          if (!isNaN(num) && num > maxSeq) {
+            maxSeq = num;
+          }
+        }
+      }
+    }
 
     for (let i = 0; i < studentsData.length; i++) {
       const item = studentsData[i];
@@ -1094,7 +1125,7 @@ class StorageService {
       const discVal = Number(item.discountValue) || 0;
       const { discountAmount, finalAmount } = calculateDiscount(baseFee, discType, discVal);
 
-      const nextSeq = this.students.length + createdStudents.length + 1;
+      const nextSeq = maxSeq + i + 1;
       const studentId = `AYC-${year}-${String(nextSeq).padStart(3, '0')}`;
 
       const joinDate = item.joiningDate || today.toISOString().split('T')[0];
@@ -1223,7 +1254,7 @@ class StorageService {
   }
 
   // --- ATOMIC ENROLLMENT & ADVANCE PAYMENT COLLECTION ---
-  enrollStudentWithBilling(params: {
+  async enrollStudentWithBilling(params: {
     fullName?: string;
     parentName?: string;
     mobileNumber?: string;
@@ -1249,7 +1280,7 @@ class StorageService {
     receiptRemarks?: string;
     notes?: string;
     collectedBy?: string;
-  }): { student: Student; cycle: BillingCycle; payment?: Payment; receipt?: Receipt } {
+  }): Promise<{ student: Student; cycle: BillingCycle; payment?: Payment; receipt?: Receipt }> {
     const sData = params.studentData || {
       fullName: params.fullName || '',
       parentName: params.parentName || '',
@@ -1272,9 +1303,7 @@ class StorageService {
     const reason = params.discountReason || params.discountNote || params.studentData?.discountReason || params.studentData?.discountNote || '';
 
     // Generate Student ID
-    const nextSeq = this.students.length + 1;
-    const year = new Date().getFullYear();
-    const studentId = `AYC-${year}-${String(nextSeq).padStart(3, '0')}`;
+    const studentId = this.generateNextStudentId();
 
     const amountPaid = Number(params.amountPaid) || 0;
     const outstandingAmount = Math.max(0, finalAmount - amountPaid);
@@ -1378,10 +1407,6 @@ class StorageService {
         status: 'Active',
       };
 
-      this.payments.unshift(payment);
-      this.receipts.unshift(receipt);
-      saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
-      saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
     }
 
     const cycle: BillingCycle = {
@@ -1419,18 +1444,28 @@ class StorageService {
       createdAt: new Date().toISOString(),
     };
 
+    // STRICT CLOUD SYNC: Save to Supabase Cloud FIRST!
+    await supabaseSyncService.syncStudent(newStudent);
+    await supabaseSyncService.syncBillingCycle(cycle);
+    if (payment) await supabaseSyncService.syncPayment(payment);
+    if (receipt) await supabaseSyncService.syncReceipt(receipt);
+
+    // ONLY after cloud confirmation, update local state
+    if (payment) {
+      this.payments.unshift(payment);
+      saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
+    }
+    if (receipt) {
+      this.receipts.unshift(receipt);
+      saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+    }
+
     this.students.unshift(newStudent);
     this.billingCycles.unshift(cycle);
 
     this.recalculateBatchCounts();
     saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
     saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
-
-    // Sync enrollment records to Supabase
-    supabaseSyncService.syncStudent(newStudent);
-    supabaseSyncService.syncBillingCycle(cycle);
-    if (payment) supabaseSyncService.syncPayment(payment);
-    if (receipt) supabaseSyncService.syncReceipt(receipt);
 
     this.notifyDataChanged();
 
@@ -2453,11 +2488,11 @@ class StorageService {
     return newTrial;
   }
 
-  convertTrialToStudent(trialId: string, studentData?: Partial<Student>): Student {
+  async convertTrialToStudent(trialId: string, studentData?: Partial<Student>): Promise<Student> {
     const trial = this.trials.find(t => t.id === trialId);
     if (!trial) throw new Error('Trial not found');
 
-    const newStudent = this.saveStudent({
+    const newStudent = await this.saveStudent({
       fullName: trial.studentName,
       mobileNumber: trial.phone,
       whatsappNumber: trial.phone,

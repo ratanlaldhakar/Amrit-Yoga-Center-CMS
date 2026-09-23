@@ -250,7 +250,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     const cleanMobile = cleanIndianPhone(mobileNumber);
@@ -270,7 +270,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
 
       if (studentToEdit) {
         // Edit existing student details
-        const saved = storageService.saveStudent({
+        const saved = await storageService.saveStudent({
           id: studentToEdit.id,
           fullName: fullName.trim(),
           parentName: parentName.trim() || undefined,
@@ -304,7 +304,7 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
           finalAmountPaid = Math.min(finalPayable, Math.max(1, Number(amountPaidInput)));
         }
 
-        const { student, receipt } = storageService.enrollStudentWithBilling({
+        const { student, receipt } = await storageService.enrollStudentWithBilling({
           fullName: fullName.trim(),
           parentName: parentName.trim() || undefined,
           mobileNumber: cleanMobile,
@@ -896,8 +896,17 @@ export const StudentFormModal: React.FC<StudentFormModalProps> = ({
               disabled={isSubmitting}
               className="inline-flex items-center gap-1.5 px-5 py-2 text-xs font-semibold text-white bg-brand-700 hover:bg-brand-800 rounded transition-colors shadow-2xs disabled:opacity-50"
             >
-              <CheckCircle2 className="w-4 h-4" />
-              {studentToEdit ? 'Save Student Changes' : 'Enroll & Issue Receipt'}
+              {isSubmitting ? (
+                <>
+                  <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Saving to Database...
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="w-4 h-4" />
+                  {studentToEdit ? 'Save Student Changes' : 'Enroll & Issue Receipt'}
+                </>
+              )}
             </button>
           </div>
         </div>

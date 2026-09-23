@@ -514,12 +514,11 @@ class SupabaseSyncService {
 
   async syncStudent(student: Student): Promise<void> {
     if (!isSupabaseConfigured || !supabase) return;
-    try {
-      const row = studentToSupabase(student);
-      const { error } = await supabase.from('students').upsert(row, { onConflict: 'id' });
-      if (error) console.warn('Supabase syncStudent warning:', error.message);
-    } catch (err) {
-      console.warn('Supabase syncStudent error:', err);
+    const row = studentToSupabase(student);
+    const { error } = await supabase.from('students').upsert(row, { onConflict: 'id' });
+    if (error) {
+      console.error('Supabase syncStudent failed:', error);
+      throw new Error(`Cloud Database Error (Students): ${error.message}`);
     }
   }
 
@@ -561,12 +560,11 @@ class SupabaseSyncService {
       console.warn('Supabase syncBillingCycle blocked obsolete cycle:', cycle.id);
       return;
     }
-    try {
-      const row = billingCycleToSupabase(cycle);
-      const { error } = await supabase.from('billing_cycles').upsert(row, { onConflict: 'id' });
-      if (error) console.warn('Supabase syncBillingCycle warning:', error.message);
-    } catch (err) {
-      console.warn('Supabase syncBillingCycle error:', err);
+    const row = billingCycleToSupabase(cycle);
+    const { error } = await supabase.from('billing_cycles').upsert(row, { onConflict: 'id' });
+    if (error) {
+      console.error('Supabase syncBillingCycle failed:', error);
+      throw new Error(`Cloud Database Error (Billing Cycles): ${error.message}`);
     }
   }
 
