@@ -1561,11 +1561,6 @@ class StorageService {
         });
       }
 
-      // Fallback: match any unpaid cycle for this student
-      if (!cycle && payment.studentId) {
-        cycle = this.billingCycles.find(c => c.studentId === payment.studentId && c.status !== 'PAID');
-      }
-
       if (cycle) {
         if (payment.billingCycleId !== cycle.id) {
           payment.billingCycleId = cycle.id;
