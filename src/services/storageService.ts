@@ -17,6 +17,7 @@ import {
   DiscountType,
   Gender,
   StudentStatus,
+  FeePaymentStatus,
   UpdateReceiptPaymentParams,
 } from '../types';
 import {
@@ -316,7 +317,7 @@ class StorageService {
       cyclesModified = true;
     }
 
-    // Deduplicate billing cycles per student (prioritize September active cycle and actively delete duplicates from Supabase)
+    // Deduplicate billing cycles per student PER PERIOD/MONTH
     const cyclesToDeleteFromSupabase: string[] = [];
     const cycleMap = new Map<string, BillingCycle>();
     for (const c of this.billingCycles) {
@@ -325,18 +326,19 @@ class StorageService {
         cyclesModified = true;
         continue;
       }
-      const existing = cycleMap.get(c.studentId);
+      const periodKey = `${c.studentId}_${(c.periodStartDate || '').slice(0, 7)}`;
+      const existing = cycleMap.get(periodKey);
       if (!existing) {
-        cycleMap.set(c.studentId, c);
+        cycleMap.set(periodKey, c);
       } else {
         cyclesModified = true;
-        // Decide which cycle to keep
+        // Decide which cycle to keep for the SAME period
         if (c.status === 'PAID' && existing.status !== 'PAID') {
           cyclesToDeleteFromSupabase.push(existing.id);
-          cycleMap.set(c.studentId, c);
+          cycleMap.set(periodKey, c);
         } else if (existing.status !== 'PAID' && c.dueDate > existing.dueDate) {
           cyclesToDeleteFromSupabase.push(existing.id);
-          cycleMap.set(c.studentId, c);
+          cycleMap.set(periodKey, c);
         } else {
           cyclesToDeleteFromSupabase.push(c.id);
         }
@@ -364,31 +366,45 @@ class StorageService {
       }
     });
 
-    const existingStudentCycleIds = new Set(this.billingCycles.map(c => c.studentId));
+    const todayStr = today.toISOString().split('T')[0];
 
     this.students.forEach(s => {
-      if (s.status === 'Active' && !existingStudentCycleIds.has(s.id)) {
+      if (s.status !== 'Active') return;
+
+      const studentCycles = this.billingCycles.filter(c => c.studentId === s.id);
+      // Check if student has a cycle covering their nextDueDate or current/unpaid period
+      const hasCurrentCycle = studentCycles.some(c => {
+        if (s.nextDueDate && c.periodStartDate === s.nextDueDate) return true;
+        if (c.periodStartDate && c.periodStartDate >= '2026-09-01' && (c.status !== 'PAID' || (c.periodEndDate && c.periodEndDate >= todayStr))) return true;
+        return false;
+      });
+
+      if (!hasCurrentCycle) {
         const batch = this.batches.find(b => b.id === s.batchId);
         const batchName = batch ? batch.batchName : (s.batchName || 'Unassigned');
         const baseAmount = s.baseFee || s.monthlyFee || (batch ? batch.monthlyFee : 1800);
-        const discountType = s.discountType || 'NONE';
-        const discountValue = s.discountValue || 0;
-        const discountAmount = s.discountAmount || 0;
-        const finalAmount = s.finalFee || s.monthlyFee || Math.max(0, baseAmount - discountAmount);
+        const discType = s.discountType || 'NONE';
+        const discVal = s.discountValue || 0;
+        const calculated = calculateDiscount(baseAmount, discType, discVal);
+        const discountAmount = calculated.discountAmount;
+        const finalAmount = calculated.finalAmount;
 
-        const joinDay = parseInt((s.joiningDate || '2026-09-10').split('-')[2], 10) || 10;
-        const joinDayPadded = String(Math.min(joinDay, 30)).padStart(2, '0');
-        const startDate = `2026-09-${joinDayPadded}`;
+        const startDate = s.nextDueDate || (() => {
+          const joinDay = parseInt((s.joiningDate || '2026-09-10').split('-')[2], 10) || 10;
+          const joinDayPadded = String(Math.min(joinDay, 30)).padStart(2, '0');
+          return `2026-09-${joinDayPadded}`;
+        })();
         const duration = s.planDurationMonths || 1;
         const period = calculateBillingPeriod(startDate, duration);
         const dueDate = startDate;
 
         const { status, daysOverdue } = calculateCycleStatus(dueDate, finalAmount, 0, today);
 
-        // Check if student has an actual legitimate payment recorded
+        // Check if student has an actual legitimate payment recorded for this period
         const matchingPay = this.payments.find(
           p => p.studentId === s.id && p.status === 'Valid' &&
-               !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo?.startsWith('AYC-REC-')
+               !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo?.startsWith('AYC-REC-') &&
+               (p.billingPeriod?.includes(startDate) || p.billingStartDate === startDate)
         );
 
         const isActuallyPaid = Boolean(matchingPay);
@@ -396,45 +412,47 @@ class StorageService {
         const initialAmountPaid = isActuallyPaid ? (matchingPay?.amount || finalAmount) : 0;
         const initialOutstanding = isActuallyPaid ? 0 : finalAmount;
 
-        const newCycle: BillingCycle = {
-          id: `bc-${s.id}-202609`,
-          studentId: s.id,
-          studentName: s.fullName,
-          studentCode: s.studentId,
-          mobileNumber: s.mobileNumber,
-          batchId: s.batchId || '',
-          batchName,
-          planName: s.feePlan || 'Monthly Regular',
-          durationMonths: duration,
-          cycleNumber: 1,
-          periodStartDate: period.periodStartDate,
-          periodEndDate: period.periodEndDate,
-          dueDate,
-          nextDueDate: dueDate,
-          baseAmount,
-          discountType,
-          discountValue,
-          discountAmount,
-          discountNote: s.discountNote || s.discountReason,
-          finalAmount,
-          payableAmount: finalAmount,
-          amountPaid: initialAmountPaid,
-          outstandingAmount: initialOutstanding,
-          status: initialStatus,
-          paymentStatus: initialStatus,
-          daysOverdue: isActuallyPaid ? 0 : daysOverdue,
-          receiptNo: matchingPay ? matchingPay.receiptNo : undefined,
-          paymentDate: matchingPay ? matchingPay.paymentDate : undefined,
-          paymentMethod: matchingPay ? matchingPay.paymentMethod : undefined,
-          notes: 'September 2026 cycle anchored on joining day',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
+        const cycleId = `bc-${s.id}-${startDate.replace(/-/g, '')}`;
+        if (!this.billingCycles.some(c => c.id === cycleId)) {
+          const newCycle: BillingCycle = {
+            id: cycleId,
+            studentId: s.id,
+            studentName: s.fullName,
+            studentCode: s.studentId,
+            mobileNumber: s.mobileNumber,
+            batchId: s.batchId || '',
+            batchName,
+            planName: s.feePlan || 'Monthly Regular',
+            durationMonths: duration,
+            cycleNumber: (studentCycles.length || 0) + 1,
+            periodStartDate: period.periodStartDate,
+            periodEndDate: period.periodEndDate,
+            dueDate,
+            nextDueDate: dueDate,
+            baseAmount,
+            discountType: discType,
+            discountValue: discVal,
+            discountAmount,
+            discountNote: s.discountNote || s.discountReason,
+            finalAmount,
+            payableAmount: finalAmount,
+            amountPaid: initialAmountPaid,
+            outstandingAmount: initialOutstanding,
+            status: initialStatus,
+            paymentStatus: initialStatus,
+            daysOverdue: isActuallyPaid ? 0 : daysOverdue,
+            receiptNo: matchingPay ? matchingPay.receiptNo : undefined,
+            paymentDate: matchingPay ? matchingPay.paymentDate : undefined,
+            paymentMethod: matchingPay ? matchingPay.paymentMethod : undefined,
+            notes: `Renewal cycle for period ${period.periodStartDate} to ${period.periodEndDate}`,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
 
-        this.billingCycles.push(newCycle);
-        existingStudentCycleIds.add(s.id);
-        cyclesModified = true;
-        supabaseSyncService.syncBillingCycle(newCycle);
+          this.billingCycles.push(newCycle);
+          cyclesModified = true;
+          supabaseSyncService.syncBillingCycle(newCycle);
+        }
       }
     });
 
@@ -1679,6 +1697,41 @@ class StorageService {
         modified = true;
       }
     });
+
+    // 2. Dynamic Student Billing Status Sync: ensure students reflect current cycle status
+    const todayStr = today.toISOString().split('T')[0];
+    let studentsModified = false;
+    this.students.forEach(student => {
+      if (student.status !== 'Active') return;
+      const studentCycles = this.billingCycles.filter(c => c.studentId === student.id);
+      const overdueCycle = studentCycles.find(c => c.status === 'OVERDUE' || c.paymentStatus === 'OVERDUE');
+      const dueTodayCycle = studentCycles.find(c => c.status === 'DUE TODAY' || c.paymentStatus === 'DUE TODAY');
+      const partialCycle = studentCycles.find(c => c.status === 'PARTIALLY PAID' || c.paymentStatus === 'PARTIALLY PAID');
+
+      let newStatus: FeePaymentStatus;
+      if (overdueCycle || (student.nextDueDate && student.nextDueDate < todayStr && (!student.paidThroughDate || student.paidThroughDate < todayStr))) {
+        newStatus = 'OVERDUE';
+      } else if (dueTodayCycle || student.nextDueDate === todayStr) {
+        newStatus = 'DUE TODAY';
+      } else if (partialCycle) {
+        newStatus = 'PARTIALLY PAID';
+      } else if (student.paidThroughDate && student.paidThroughDate >= todayStr) {
+        newStatus = 'PAID';
+      } else {
+        newStatus = 'UPCOMING';
+      }
+
+      if (student.billingStatus !== newStatus) {
+        student.billingStatus = newStatus;
+        student.updatedAt = new Date().toISOString();
+        studentsModified = true;
+        supabaseSyncService.syncStudent(student);
+      }
+    });
+
+    if (studentsModified) {
+      saveToStorage(STORAGE_KEYS.STUDENTS, this.students);
+    }
 
     if (modified) {
       saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);

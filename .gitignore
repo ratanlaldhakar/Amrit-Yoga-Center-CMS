@@ -29,5 +29,8 @@ dist-ssr
 *.sln
 *.sw?
 
+# Android build directory
+android/
+
 # Temporary / OS
 Thumbs.db
