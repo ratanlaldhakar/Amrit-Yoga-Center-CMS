@@ -230,26 +230,19 @@ class StorageService {
       modified = true;
     }
 
-    // Purge orphan billing cycles, payments, and receipts
-    const validStudentIds = new Set((this.students || []).map(s => s.id));
-    if (this.billingCycles && this.billingCycles.some(bc => !validStudentIds.has(bc.studentId) || bc.id.includes('1789659494172'))) {
-      const deletedCycles = this.billingCycles.filter(bc => !validStudentIds.has(bc.studentId) || bc.id.includes('1789659494172'));
-      deletedCycles.forEach(bc => supabaseSyncService.deleteBillingCycle(bc.id));
-      this.billingCycles = this.billingCycles.filter(bc => validStudentIds.has(bc.studentId) && !bc.id.includes('1789659494172'));
+    // Safely filter known corrupt/test synthetic IDs from memory only without issuing remote deletes
+    if (this.billingCycles && this.billingCycles.some(bc => bc.id.includes('1789659494172'))) {
+      this.billingCycles = this.billingCycles.filter(bc => !bc.id.includes('1789659494172'));
       saveToStorage(STORAGE_KEYS.BILLING_CYCLES, this.billingCycles);
       modified = true;
     }
-    if (this.payments && this.payments.some(p => !validStudentIds.has(p.studentId) || p.id.startsWith('pay-rec-') || p.id.startsWith('pay-bc-') || p.receiptNo.startsWith('AYC-REC-'))) {
-      const deletedPayments = this.payments.filter(p => !validStudentIds.has(p.studentId) || p.id.startsWith('pay-rec-') || p.id.startsWith('pay-bc-') || p.receiptNo.startsWith('AYC-REC-'));
-      deletedPayments.forEach(p => supabaseSyncService.deletePayment(p.id));
-      this.payments = this.payments.filter(p => validStudentIds.has(p.studentId) && !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo.startsWith('AYC-REC-'));
+    if (this.payments && this.payments.some(p => p.id.startsWith('pay-rec-') || p.id.startsWith('pay-bc-') || p.receiptNo?.startsWith('AYC-REC-'))) {
+      this.payments = this.payments.filter(p => !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo?.startsWith('AYC-REC-'));
       saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
       modified = true;
     }
-    if (this.receipts && this.receipts.some(r => !validStudentIds.has(r.studentId) || r.id.startsWith('rec-bc-') || r.id.includes('17901020794') || r.receiptNo.startsWith('AYC-REC-'))) {
-      const deletedReceipts = this.receipts.filter(r => !validStudentIds.has(r.studentId) || r.id.startsWith('rec-bc-') || r.id.includes('17901020794') || r.receiptNo.startsWith('AYC-REC-'));
-      deletedReceipts.forEach(r => supabaseSyncService.deleteReceipt(r.id));
-      this.receipts = this.receipts.filter(r => validStudentIds.has(r.studentId) && !r.id.startsWith('rec-bc-') && !r.id.includes('17901020794') && !r.receiptNo.startsWith('AYC-REC-'));
+    if (this.receipts && this.receipts.some(r => r.id.startsWith('rec-bc-') || r.id.includes('17901020794') || r.receiptNo?.startsWith('AYC-REC-'))) {
+      this.receipts = this.receipts.filter(r => !r.id.startsWith('rec-bc-') && !r.id.includes('17901020794') && !r.receiptNo?.startsWith('AYC-REC-'));
       saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
       modified = true;
     }
@@ -2793,6 +2786,40 @@ class StorageService {
           r => !r.id.startsWith('rec-bc-') && !r.id.includes('17901020794') && !r.receiptNo?.startsWith('AYC-REC-')
         );
         saveToStorage(STORAGE_KEYS.RECEIPTS, this.receipts);
+
+        // Auto-reconstruct payments from receipts if any payment was missing!
+        const existingReceiptNos = new Set((this.payments || []).map(p => p.receiptNo));
+        this.receipts.forEach(r => {
+          if (r.receiptNo && !existingReceiptNos.has(r.receiptNo)) {
+            const stu = this.students.find(s => s.id === r.studentId);
+            const reconstructedPay: Payment = {
+              id: r.paymentId || `pay-${r.receiptNo}`,
+              receiptNo: r.receiptNo,
+              studentId: r.studentId,
+              studentName: r.studentName,
+              studentCode: stu ? stu.studentId : (r.studentCode || ''),
+              billingCycleId: undefined,
+              planName: r.planName || 'Monthly Regular',
+              billingPeriod: r.billingPeriod,
+              billingStartDate: r.billingStartDate,
+              billingEndDate: r.billingEndDate,
+              baseAmount: r.baseAmount || r.amount,
+              discountAmount: r.discountAmount || 0,
+              amount: r.amount,
+              feeMonth: r.feeMonth || r.billingPeriod || 'General',
+              paymentDate: r.issuedDate || new Date().toISOString().split('T')[0],
+              paymentMethod: (r.paymentMethod as any) || 'UPI',
+              notes: r.notes || '',
+              collectedBy: 'Admin',
+              status: 'Valid',
+              createdAt: new Date().toISOString(),
+            };
+            this.payments.push(reconstructedPay);
+            existingReceiptNos.add(r.receiptNo);
+            supabaseSyncService.syncPayment(reconstructedPay);
+          }
+        });
+        saveToStorage(STORAGE_KEYS.PAYMENTS, this.payments);
       }
 
       this.expenses = res.expenses || [];
