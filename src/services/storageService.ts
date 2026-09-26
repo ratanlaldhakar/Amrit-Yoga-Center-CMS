@@ -511,11 +511,28 @@ class StorageService {
 
     // Reconcile settled/PAID billing cycles with receipts and payments (READ-ONLY: NEVER create synthetic payments or receipts)
     this.billingCycles.forEach(c => {
-      // Find legitimate payment matching this cycle or student
-      const payment = this.payments.find(
-        p => (p.billingCycleId === c.id || (c.receiptNo && p.receiptNo === c.receiptNo) || (p.studentId === c.studentId && p.status === 'Valid')) &&
-             !p.id.startsWith('pay-rec-') && !p.id.startsWith('pay-bc-') && !p.receiptNo?.startsWith('AYC-REC-')
-      );
+      // Find legitimate payment matching this cycle specifically
+      const payment = this.payments.find(p => {
+        if (p.status !== 'Valid') return false;
+        if (p.id.startsWith('pay-rec-') || p.id.startsWith('pay-bc-') || p.receiptNo?.startsWith('AYC-REC-')) return false;
+        if (p.billingCycleId === c.id) return true;
+        if (c.receiptNo && p.receiptNo === c.receiptNo) return true;
+        if (p.studentId === c.studentId) {
+          // Only match if payment billing period matches cycle period
+          if (p.billingStartDate && p.billingEndDate) {
+            return p.billingStartDate === c.periodStartDate && p.billingEndDate === c.periodEndDate;
+          }
+          if (p.billingPeriod) {
+            const periodStr = `${c.periodStartDate} to ${c.periodEndDate}`;
+            return p.billingPeriod.includes(c.periodStartDate) || p.billingPeriod === periodStr;
+          }
+          // Or paymentDate falls strictly within the cycle's period
+          if (p.paymentDate && c.periodStartDate && c.periodEndDate) {
+            return p.paymentDate >= c.periodStartDate && p.paymentDate <= c.periodEndDate;
+          }
+        }
+        return false;
+      });
       const receipt = this.receipts.find(
         r => ((c.receiptNo && r.receiptNo === c.receiptNo) || (payment && r.paymentId === payment.id)) &&
              !r.id.startsWith('rec-bc-') && !r.id.includes('17901020794') && !r.receiptNo?.startsWith('AYC-REC-')
@@ -1594,7 +1611,14 @@ class StorageService {
       studentCycles.forEach(cycle => {
         if (studentPaidThrough && cycle.periodEndDate <= studentPaidThrough) {
           if (cycle.status !== 'PAID' || cycle.paymentStatus !== 'PAID' || cycle.outstandingAmount > 0) {
-            const matchingPay = validPayments.find(p => p.studentId === student.id);
+            const matchingPay = validPayments.find(p =>
+              p.billingCycleId === cycle.id ||
+              (p.studentId === student.id && (
+                (p.billingStartDate && p.billingEndDate && p.billingStartDate === cycle.periodStartDate && p.billingEndDate === cycle.periodEndDate) ||
+                (p.billingPeriod && (p.billingPeriod.includes(cycle.periodStartDate) || p.billingPeriod === `${cycle.periodStartDate} to ${cycle.periodEndDate}`)) ||
+                (p.paymentDate && cycle.periodStartDate && cycle.periodEndDate && p.paymentDate >= cycle.periodStartDate && p.paymentDate <= cycle.periodEndDate)
+              ))
+            );
             cycle.amountPaid = cycle.finalAmount || 2000;
             cycle.outstandingAmount = 0;
             cycle.status = 'PAID';
@@ -2588,10 +2612,14 @@ class StorageService {
     );
     const feesCollectedThisMonth = validPaymentsThisMonth.reduce((acc, curr) => acc + curr.amount, 0);
 
-    // Pending fees & Overdue calculations
+    // Pending fees & Overdue calculations (excluding UPCOMING future renewal cycles)
     this.recalculateCycleStatuses();
     const unpaidCycles = this.billingCycles.filter(
-      f => (f.status || f.paymentStatus) !== 'PAID' && (f.outstandingAmount > 0 || (f.amountPaid === 0 && f.finalAmount > 0))
+      f => {
+        const st = f.status || f.paymentStatus;
+        if (st === 'PAID' || st === 'UPCOMING') return false;
+        return (f.outstandingAmount > 0 || (f.amountPaid === 0 && f.finalAmount > 0));
+      }
     );
     const pendingFeesAmount = unpaidCycles.reduce((acc, curr) => {
       const amt = curr.outstandingAmount !== undefined ? curr.outstandingAmount : (curr.finalAmount - (curr.amountPaid || 0));

@@ -78,7 +78,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
       if (status === 'DUE TODAY') dueToday++;
       if (status === 'UPCOMING') upcoming++;
       if (status === 'PARTIALLY PAID') partial++;
-      if (status !== 'PAID') allPending++;
+      if (status === 'OVERDUE' || status === 'DUE TODAY' || status === 'PARTIALLY PAID') {
+        allPending++;
+      }
     });
 
     return { overdue, dueToday, upcoming, partial, allPending, total: billingCycles.length };
@@ -108,7 +110,9 @@ export const FeesView: React.FC<FeesViewProps> = ({
 
         const status = getEffectiveCycleStatus(cycle, student);
         if (activeTab === 'all') return true;
-        if (activeTab === 'all_pending') return status !== 'PAID';
+        if (activeTab === 'all_pending') {
+          return status === 'OVERDUE' || status === 'DUE TODAY' || status === 'PARTIALLY PAID';
+        }
         if (activeTab === 'overdue') return status === 'OVERDUE';
         if (activeTab === 'due_today') return status === 'DUE TODAY';
         if (activeTab === 'upcoming') return status === 'UPCOMING';
@@ -387,10 +391,12 @@ export const FeesView: React.FC<FeesViewProps> = ({
                 const batchName = student?.batchName || cycle.batchName || 'Unassigned';
                 const planName = student?.feePlan || cycle.planName || 'Monthly Regular';
 
-                const isPaid = cycle.paymentStatus === 'PAID' || cycle.status === 'PAID';
-                const isOverdue = cycle.paymentStatus === 'OVERDUE';
-                const isDueToday = cycle.paymentStatus === 'DUE TODAY';
-                const isPartial = cycle.paymentStatus === 'PARTIALLY PAID';
+                const effectiveStatus = getEffectiveCycleStatus(cycle, student);
+                const isPaid = effectiveStatus === 'PAID';
+                const isOverdue = effectiveStatus === 'OVERDUE';
+                const isDueToday = effectiveStatus === 'DUE TODAY';
+                const isUpcoming = effectiveStatus === 'UPCOMING';
+                const isPartial = effectiveStatus === 'PARTIALLY PAID';
 
                 return (
                   <div
@@ -428,7 +434,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                             <Clock className="w-2.5 h-2.5" /> Due Today
                           </span>
                         )}
-                        {cycle.paymentStatus === 'UPCOMING' && (
+                        {isUpcoming && (
                           <span className="inline-flex items-center gap-1 text-[10px] text-blue-700 font-semibold bg-blue-50 px-2 py-0.5 rounded-full border border-blue-200">
                             <Calendar className="w-2.5 h-2.5" /> Upcoming
                           </span>
@@ -648,7 +654,7 @@ export const FeesView: React.FC<FeesViewProps> = ({
                         {/* Status Badge */}
                         <td className="py-2.5 px-4 whitespace-nowrap">
                           {(() => {
-                            const effectiveStatus = cycle.paymentStatus || cycle.status;
+                            const effectiveStatus = getEffectiveCycleStatus(cycle, student);
                             if (effectiveStatus === 'PAID') {
                               return (
                                 <span className="inline-flex items-center gap-1 text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
